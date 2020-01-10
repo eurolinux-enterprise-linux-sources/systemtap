@@ -1,0 +1,19 @@
+commit d2de228a13c5dc0c758a196e28a11ed3f8266dd5
+Author: David Smith <dsmith@redhat.com>
+Date:   Mon May 5 16:33:19 2014 -0500
+
+    Make syscall.sendfile optional.
+
+diff --git a/tapset/linux/syscalls2.stp b/tapset/linux/syscalls2.stp
+index 90c3d6f..359c359 100644
+--- a/tapset/linux/syscalls2.stp
++++ b/tapset/linux/syscalls2.stp
+@@ -1997,7 +1997,7 @@ probe syscall.send.return = kernel.function("sys_send").return ?
+ # COMPAT_SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd,
+ #		compat_loff_t __user *, offset, compat_size_t, count)
+ #
+-probe syscall.sendfile = __syscall.sendfile, __syscall.compat_sendfile
++probe syscall.sendfile = __syscall.sendfile ?, __syscall.compat_sendfile ?
+ {
+ 	name = "sendfile"
+ 	out_fd = __int32($out_fd)

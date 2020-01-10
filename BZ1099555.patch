@@ -1,0 +1,310 @@
+commit e56d75e475905a0cbc5ec5c65289b8745ec3e39f
+Author: David Smith <dsmith@redhat.com>
+Date:   Thu Jun 5 10:46:14 2014 -0500
+
+    Update gtod.exp for BZ1099555 to make output more clear.
+    
+    * testsuite/systemtap.base/gtod.exp: Split test into 3 sub tests so that
+      failures can be more easily identified.
+
+diff --git a/testsuite/systemtap.base/gtod.exp b/testsuite/systemtap.base/gtod.exp
+index f872601..48bb414 100644
+--- a/testsuite/systemtap.base/gtod.exp
++++ b/testsuite/systemtap.base/gtod.exp
+@@ -25,93 +25,52 @@ target_compile $filename $wd/gtod executable ""
+ # old multi-line matching (which once it got out of sync could never
+ # seem to get back into sync).
+ 
+-# non interval (check timer drift in short range)
+-set state -1
+-set count "XX"
+-spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod
+-set ok 0
+-expect {
+-	-timeout 120
+-	-re {^[0-9]+ \:([0-9]+) appl\r\n} {
+-		set state 0
+-		set count $expect_out(1,string)
+-		exp_continue
+-	}
+-	-re {^[0-9]+ \:([0-9]+) kern\r\n} {
+-		if {$state == 0 && $count == $expect_out(1,string)} {
+-			set state 1
+-		} else {
+-			set state -1
+-		}
+-		exp_continue
+-	}
+-	-re {^[0-9]+ \:([0-9]+) prog\r\n} {
+-		if {$state == 1 && $count == $expect_out(1,string)} { incr ok }
+-		set state -1
+-		exp_continue
+-	}
+-	timeout { fail "$test (timeout)" }
+-	eof { }
+-}
+-wait
++for {set i 0} { $i < 3 } {incr i } {
++    if {$i == 0} {
++	# non interval (check timer drift in short range)
++	set test "gtod (short range)"
++	spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod
++    } elseif {$i == 1} {
++	# 10ms interval (check timer drift in middle range)
++	set test "gtod (10ms interval)"
++	spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod 10000
++    } else {
++	# 100ms interval (calm down processors and CPU freq might be
++	# changed)
++	set test "gtod (100ms interval)"
++	spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod 100000
++    }
+ 
+-#10ms interval (check timer drift in middle range)
+-set state -1
+-set count "XX"
+-spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod 10000
+-expect {
++    set state -1
++    set count "XX"
++    set ok 0
++    expect {
+ 	-timeout 120
+ 	-re {^[0-9]+ \:([0-9]+) appl\r\n} {
+-		set state 0
+-		set count $expect_out(1,string)
+-		exp_continue
++	    set state 0
++	    set count $expect_out(1,string)
++	    exp_continue
+ 	}
+ 	-re {^[0-9]+ \:([0-9]+) kern\r\n} {
+-		if {$state == 0 && $count == $expect_out(1,string)} {
+-			set state 1
+-		} else {
+-			set state -1
+-		}
+-		exp_continue
+-	}
+-	-re {^[0-9]+ \:([0-9]+) prog\r\n} {
+-		if {$state == 1 && $count == $expect_out(1,string)} { incr ok }
++	    if {$state == 0 && $count == $expect_out(1,string)} {
++		set state 1
++	    } else {
+ 		set state -1
+-		exp_continue
+-	}
+-	timeout { fail "$test (timeout)" }
+-	eof { }
+-}
+-wait
+-
+-#100ms interval (calm down processors and CPU freq might be changed)
+-set state -1
+-set count "XX"
+-spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod 100000
+-expect {
+-	-timeout 120
+-	-re {^[0-9]+ \:([0-9]+) appl\r\n} {
+-		set state 0
+-		set count $expect_out(1,string)
+-		exp_continue
+-	}
+-	-re {^[0-9]+ \:([0-9]+) kern\r\n} {
+-		if {$state == 0 && $count == $expect_out(1,string)} {
+-			set state 1
+-		} else {
+-			set state -1
+-		}
+-		exp_continue
++	    }
++	    exp_continue
+ 	}
+ 	-re {^[0-9]+ \:([0-9]+) prog\r\n} {
+-		if {$state == 1 && $count == $expect_out(1,string)} { incr ok }
+-		set state -1
+-		exp_continue
++	    if {$state == 1 && $count == $expect_out(1,string)} { incr ok }
++	    set state -1
++	    exp_continue
+ 	}
+ 	timeout { fail "$test (timeout)" }
+ 	eof { }
++    }
++    catch {close}; catch {wait}
++    if {$ok == 100} { pass "$test ($ok)" } { fail "$test ($ok)" }
+ }
+-wait
++
+ exec rm -f $wd/gtod
+-if {$ok == 300} { pass "$test ($ok)" } { fail "$test ($ok)" }
++
+ 
+
+commit cc182e85769f59c897617bf93788a13f288e8a45
+Author: David Smith <dsmith@redhat.com>
+Date:   Mon Jun 9 09:11:13 2014 -0500
+
+    Fix BZ1099555 by reworking gtod.exp.
+    
+    * testsuite/systemtap.base/gtod.exp: Rework so that we don't care about
+      what order the output comes. All we care about now is the variance
+      between the kernel's time and systemtap's time.
+    * testsuite/systemtap.base/gtod.c (main): Print the iteration number first.
+    * testsuite/systemtap.base/gtod.stp: Ditto.
+
+diff --git a/testsuite/systemtap.base/gtod.c b/testsuite/systemtap.base/gtod.c
+index 2005955..a45152e 100644
+--- a/testsuite/systemtap.base/gtod.c
++++ b/testsuite/systemtap.base/gtod.c
+@@ -18,8 +18,10 @@ int main (int argc, char *argv[])
+ 	for (i=0; i<100; i++) {
+ 		// change last 4 chars for correctly sorting even if the
+ 		// time stamps are completely same.
+-		printf("%8ld%06ld :%02d appl\n", tv[i][0].tv_sec, tv[i][0].tv_usec, i);
+-		printf("%8ld%06ld :%02d prog\n", tv[i][1].tv_sec, tv[i][1].tv_usec, i);
++	    	printf(":%02d %8ld%06ld appl\n", i, tv[i][0].tv_sec,
++		       tv[i][0].tv_usec);
++		printf(":%02d %8ld%06ld prog\n", i, tv[i][1].tv_sec,
++		       tv[i][1].tv_usec);
+ 	}
+ 	return 0;
+ }
+diff --git a/testsuite/systemtap.base/gtod.exp b/testsuite/systemtap.base/gtod.exp
+index 48bb414..0d35803 100644
+--- a/testsuite/systemtap.base/gtod.exp
++++ b/testsuite/systemtap.base/gtod.exp
+@@ -7,23 +7,28 @@ set filename "$srcdir/$subdir/gtod.c"
+ 
+ target_compile $filename $wd/gtod executable ""
+ 
+-# Notice the state machine when checking output.  We're looking for
+-# lines in the following format:
++# Return the absolute difference between num1 and num2
++proc abs_diff { num1 num2 } {
++    if {$num1 > $num2} {
++	return [expr $num1 - $num2]
++    }
++    return [expr $num2 - $num1]
++}
++
++# We're looking for lines in the following format:
+ #
+-#   1336494634008794 :00 appl
+-#   1336494634008971 :00 kern
+-#   1336494634009194 :00 prog
+-#   1336494634009196 :01 appl
+-#   1336494634009199 :01 kern
+-#   1336494634009203 :01 prog
++#   :00 1336494634008794 appl
++#   :00 1336494634008971 kern
++#   :00 1336494634009194 prog
++#   :01 1336494634009196 appl
++#   :01 1336494634009199 kern
++#   :01 1336494634009203 prog
+ #   ...
+ #
+-# The lines must be in the order 'appl', 'kern', and 'prog'.  The
+-# second number, the count, must match on each of the 3 lines.
+-#
+-# The state machine should hopefully give a better ok count than the
+-# old multi-line matching (which once it got out of sync could never
+-# seem to get back into sync).
++# The lines should be in the order 'appl', 'kern', and 'prog', but we
++# don't insist on it.  If systemtap's time is a bit ahead of the
++# kernel's real time, the 'kern' line can appear first. The first
++# number, the count, must match on each of the 3 lines.
+ 
+ for {set i 0} { $i < 3 } {incr i } {
+     if {$i == 0} {
+@@ -41,33 +46,60 @@ for {set i 0} { $i < 3 } {incr i } {
+ 	spawn $srcdir/$subdir/gtod.sh $srcdir/$subdir/gtod.stp $wd/gtod 100000
+     }
+ 
+-    set state -1
+-    set count "XX"
++    # 'ok' is the number of passes
+     set ok 0
++
++    # 'count' contains the current count (iteration number) for each
++    # of the 3 sets of lines
++    set count(appl) -1
++    set count(kern) -1
++    set count(prog) -1
++
++    # 'us_time' contains the reported time for each of the 3 sets of lines
++    set us_time(appl) 0
++    set us_time(kern) 0
++    set us_time(prog) 0
++
++    # 'max_diff' is used to remember the maximum difference between
++    # systemtap's time and the kernel's time
++    set max_diff 0
++
++    # 'variance' is the maximum number of microseconds difference
++    # between systemtap's time and the kernel's time that we'll accept
++    set variance 500
++
+     expect {
+ 	-timeout 120
+-	-re {^[0-9]+ \:([0-9]+) appl\r\n} {
+-	    set state 0
+-	    set count $expect_out(1,string)
+-	    exp_continue
+-	}
+-	-re {^[0-9]+ \:([0-9]+) kern\r\n} {
+-	    if {$state == 0 && $count == $expect_out(1,string)} {
+-		set state 1
+-	    } else {
+-		set state -1
++
++	# We found a 'appl|kern|prog' line
++	-re {^\:([0-9]+) ([0-9]+) (appl|kern|prog)\r\n} {
++	    set type $expect_out(3,string)
++	    set count($type) $expect_out(1,string)
++	    set us_time($type) $expect_out(2,string)
++
++	    # If we've seen all the lines for this iteration, check
++	    # the times.
++	    if {$count(appl) == $count(kern) && $count(kern) == $count(prog)} {
++		set appl_diff [abs_diff $us_time(appl) $us_time(kern)]
++		set prog_diff [abs_diff $us_time(prog) $us_time(kern)]
++		if {$appl_diff < $variance && $prog_diff < $variance} {
++		    incr ok
++		} else {
++		    verbose -log "difference of ($appl_diff, $prog_diff) for count $count(kern) is too large"
++		}
++		if {$appl_diff > $max_diff} { set max_diff $appl_diff }
++		if {$prog_diff > $max_diff} { set max_diff $prog_diff }
+ 	    }
+ 	    exp_continue
+ 	}
+-	-re {^[0-9]+ \:([0-9]+) prog\r\n} {
+-	    if {$state == 1 && $count == $expect_out(1,string)} { incr ok }
+-	    set state -1
+-	    exp_continue
+-	}
++
+ 	timeout { fail "$test (timeout)" }
+ 	eof { }
+     }
+     catch {close}; catch {wait}
++    if {$max_diff > 0} {
++	verbose -log "maximum time difference was $max_diff us"
++    }
+     if {$ok == 100} { pass "$test ($ok)" } { fail "$test ($ok)" }
+ }
+ 
+diff --git a/testsuite/systemtap.base/gtod.stp b/testsuite/systemtap.base/gtod.stp
+index f252dc0..e90fefd 100644
+--- a/testsuite/systemtap.base/gtod.stp
++++ b/testsuite/systemtap.base/gtod.stp
+@@ -2,7 +2,7 @@ global count = 0
+ 
+ probe syscall.setsid {
+ 	if (pid() == target()) {
+-		printf("%014d :%02d kern\n", gettimeofday_us(), count);
++		printf(":%02d %014d kern\n", count, gettimeofday_us());
+ 		count ++;
+ 	}
+ }
