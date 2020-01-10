@@ -68,7 +68,7 @@
 
 Name: systemtap
 Version: 2.9
-Release: 7%{?dist}
+Release: 9%{?dist}
 # for version, see also configure.ac
 
 
@@ -108,6 +108,8 @@ Patch11: systemtap-2.9-pr19525-bulk-sigusr2.patch
 Patch12: rhbz1319085.patch
 Patch13: rhbz1320691.patch
 Patch14: rhbz1401834.patch
+Patch15: rhbz1508700.patch
+Patch16: rhbz1525651.patch
 
 # Build*
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -400,6 +402,8 @@ systemtap-runtime-virthost machine to execute systemtap scripts.
 %patch12 -p1
 %patch13 -p1
 %patch14 -p1
+%patch15 -p1
+%patch16 -p1
 
 %if %{with_bundled_elfutils}
 cd elfutils-%{elfutils_version}
@@ -1041,6 +1045,12 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Tue Feb 27 2018 Frank Ch. Eigler <fche@redhat.com> - 2.9-9
+- BZ1525651 (utrace crash)
+
+* Wed Nov 29 2017 Frank Ch. Eigler <fche@redhat.com> - 2.9-8
+- BZ1508700 (d_path runtime crash)
+
 * Tue Dec 06 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-7
 - BZ1401834 (init-time probing redux redux)
 
