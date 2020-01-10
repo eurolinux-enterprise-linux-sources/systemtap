@@ -1,6 +1,8 @@
-/* COVERAGE: epoll_create epoll_ctl epoll_wait epoll_pwait poll ppoll */
+/* COVERAGE: epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait */
+/* COVERAGE: poll ppoll */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <unistd.h>
 #include <sys/epoll.h>
 #include <poll.h>
 #include <signal.h>
@@ -8,9 +10,9 @@
 
 
 #ifdef SYS_epoll_pwait
-int __epoll_pwait(int epfd, struct epoll_event *events,
-                  int maxevents, int timeout,
-                  const sigset_t *set)
+static inline int
+__epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout,
+	      const sigset_t *set)
 {
     return syscall(__NR_epoll_pwait, epfd, events, maxevents, timeout,
                    set, _NSIG / 8);

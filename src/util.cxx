@@ -1000,7 +1000,39 @@ string unescape_glob_chars (const string& str)
   return op;
 }
 
+bool identifier_string_needs_escape (const string& str)
+{
+  for (unsigned i = 0; i < str.size (); i++)
+    {
+      char this_char = str[i];
+      if (! isalnum (this_char) && this_char != '_')
+	return true;
+    }
 
+  return false;
+}
+
+string escaped_indentifier_string (const string &str)
+{
+  if (! identifier_string_needs_escape (str))
+    return str;
+
+  string op;
+  for (unsigned i = 0; i < str.size (); i++)
+    {
+      char this_char = str[i];
+      if (! isalnum (this_char) && this_char != '_')
+	{
+	  char b[32];
+	  sprintf (b, "_%x_", (unsigned int) this_char);
+	  op += b;
+        }
+      else
+	op += this_char;
+    }
+
+  return op;
+}
 
 string
 normalize_machine(const string& machine)
@@ -1015,7 +1047,8 @@ normalize_machine(const string& machine)
   // But: RHBZ669082 reminds us that this renaming post-dates some
   // of the kernel versions we know and love.  So in buildrun.cxx
   // we undo this renaming for ancient powerpc.
-
+  //
+  // NB repeated: see also stap-env (stap_get_arch)
   if (machine == "i486") return "i386";
   else if (machine == "i586") return "i386";
   else if (machine == "i686") return "i386";
@@ -1029,6 +1062,7 @@ normalize_machine(const string& machine)
   else if (machine.substr(0,3) == "sh2") return "sh";
   else if (machine.substr(0,3) == "sh3") return "sh";
   else if (machine.substr(0,3) == "sh4") return "sh";
+  // NB repeated: see also stap-env (stap_get_arch)
   return machine;
 }
 
@@ -1236,6 +1270,23 @@ levenshtein_suggest(const string& target,        // string to match against
 
   return suggestions;
 }
+
+string
+levenshtein_suggest(const string& target,        // string to match against
+                    const set<interned_string>& elems,// elements to suggest from
+                    unsigned max,                // max elements to print
+                    unsigned threshold)          // max leven score to print
+{
+  set<string> elems2;
+  for (set<interned_string>::const_iterator it = elems.begin();
+       it != elems.end();
+       it++)
+    elems2.insert(it->to_string());
+  
+  return levenshtein_suggest (target, elems2, max, threshold);
+  
+}
+
 
 #ifndef HAVE_PPOLL
 // This is a poor-man's ppoll, only used carefully by readers that need to be

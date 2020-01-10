@@ -2,7 +2,7 @@
 // Copyright (C) 2006-2007 IBM Corp.
 // Copyright (C) 2007 Intel Corporation.
 // Copyright (C) 2007 Bull S.A.S
-// Copyright (c) 2008, 2010 Red Hat Inc.
+// Copyright (c) 2008-2015 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -192,7 +192,7 @@ probe generic.fop.aio_read =
         
 	pos = @choose_defined($pos, kernel_pointer($ppos))
 	buf = $iov->iov_base
-	count = __iov_length($iov, $nr_segs, 1, %{ VERIFY_WRITE %})
+	count = __iov_length($iov, $nr_segs, 1, %{ /* pure */ VERIFY_WRITE %})
 	name = "generic_file_aio_read"
 	argstr = sprintf("%d, %d, %p", count, pos, buf)
 
@@ -226,10 +226,10 @@ probe generic.fop.read_iter = kernel.function("generic_file_read_iter") ?
 	ino = __file_ino($iocb->ki_filp)
         
 	pos = $iter->iov_offset
-	if ($iter->type & %{ ITER_IOVEC %}) {
+	if ($iter->type & %{ /* pure */ ITER_IOVEC %}) {
 		buf = $iter->iov->iov_base
 		count = __iov_length($iter->iov, $iter->nr_segs, 1,
-				     %{ VERIFY_WRITE %})
+				     %{ /* pure */ VERIFY_WRITE %})
 	}
 	else {
 		buf = 0
@@ -270,7 +270,7 @@ probe generic.fop.aio_write = kernel.function("generic_file_aio_write") ?
         pos = $pos
 
         count = (@defined($iov)
-		? __iov_length($iov, $nr_segs, 1, %{ VERIFY_READ %})
+		? __iov_length($iov, $nr_segs, 1, %{ /* pure */ VERIFY_READ %})
 		: $count)
 	buf = @choose_defined($iov->iov_base, $buf)
 	name = "generic_file_aio_write"
@@ -300,10 +300,10 @@ probe generic.fop.write_iter = kernel.function("generic_file_write_iter") ?
 	ino = __file_ino($iocb->ki_filp)
 
 	pos = $from->iov_offset
-	if ($from->type &  %{ ITER_IOVEC %}) {
+	if ($from->type &  %{ /* pure */ ITER_IOVEC %}) {
 		buf = $from->iov->iov_base
 		count = __iov_length($from->iov, $from->nr_segs, 1,
-				     %{ VERIFY_READ %})
+				     %{ /* pure */ VERIFY_READ %})
 	}
 	else {
 		buf = 0
@@ -616,30 +616,41 @@ probe generic.aop.writepages.return = kernel.function("mpage_writepages").return
 	retstr = sprintf("%d", $return)
 }
 
-probe vfs.do_sync_read = kernel.function("do_sync_read")
+probe vfs.do_sync_read = kernel.function("do_sync_read") !,
+      __vfs.__vfs_read
 {
-	dev = __file_dev($filp)
-	devname = __find_bdevname(dev, __file_bdev($filp))
-	ino = __file_ino($filp)
-	file = $filp
+	dev = __file_dev(@choose_defined($filp, $file))
+	devname = __find_bdevname(dev,
+				  __file_bdev(@choose_defined($filp, $file)))
+	ino = __file_ino(@choose_defined($filp, $file))
+	file = @choose_defined($filp, $file)
 
-	len = $len
-	pos = kernel_pointer($ppos)
+	len = @choose_defined($len, $count)
+	pos = kernel_pointer(@choose_defined($ppos, $pos))
         buf = $buf
 
 	name = "do_sync_read"
-	argstr = sprintf("%d, %d, %p", $len, pos, $buf)
+	argstr = sprintf("%d, %d, %p", @choose_defined($len, $count),
+			 pos, $buf)
 
-	size = $len
+	size = @choose_defined($len, $count)
 	units = "bytes"
-	bytes_to_read = $len
+	bytes_to_read = @choose_defined($len, $count)
 }
-probe vfs.do_sync_read.return = kernel.function("do_sync_read").return
+# We'd really like to probe new_sync_read() here, but it is typically
+# inlined. So, we'll probe its caller, __vfs_read().
+probe __vfs.__vfs_read = kernel.function("__vfs_read")
+{
+	# Skip the call if new_sync_read() wouldn't be called.
+	if ($file->f_op->read || !$file->f_op->read_iter) next
+}
+probe vfs.do_sync_read.return = kernel.function("do_sync_read").return !,
+	__vfs.__vfs_read.return
 {
 	name = "do_sync_read"
 	retstr = sprintf("%d", $return)
 
-	bytes_to_read = $len
+	bytes_to_read = @choose_defined($len, $count)
 	ret = $return
 	bytes_read = $return > 0 ? $return : 0
 	error = $return < 0 ? $return : 0
@@ -650,32 +661,48 @@ probe vfs.do_sync_read.return = kernel.function("do_sync_read").return
 		units = "bytes"
 	}
 }
-
-probe vfs.do_sync_write = kernel.function("do_sync_write")
+probe __vfs.__vfs_read.return = kernel.function("__vfs_read").return
 {
-	dev = __file_dev($filp)
-	devname = __find_bdevname(dev, __file_bdev($filp))
-	ino = __file_ino($filp)
-	file = $filp
+	# Skip the call if new_sync_read() wouldn't be called.
+	if ($file->f_op->read || !$file->f_op->read_iter) next
+}
 
-	len = $len
-	pos = kernel_pointer($ppos)
-	buf = $buf
-	bytes_to_write = $len
+probe vfs.do_sync_write = kernel.function("do_sync_write") !,
+	__vfs.__vfs_write
+{
+	dev = __file_dev(@choose_defined($filp, $file))
+	devname = __find_bdevname(dev,
+				  __file_bdev(@choose_defined($filp, $file)))
+	ino = __file_ino(@choose_defined($filp, $file))
+	file = @choose_defined($filp, $file)
+
+	len = @choose_defined($len, $count)
+	pos = kernel_pointer(@choose_defined($ppos, $pos))
+	buf = @choose_defined($buf, $p)
+	bytes_to_write = @choose_defined($len, $count)
 
 	name = "do_sync_write"
-	argstr = sprintf("%d, %d , %p", $len, pos, $buf)
+	argstr = sprintf("%d, %d , %p", @choose_defined($len, $count),
+			 pos, @choose_defined($buf, $p))
 
-	size = $len
+	size = @choose_defined($len, $count)
 	units = "bytes"
 }
-probe vfs.do_sync_write.return = kernel.function("do_sync_write").return
+# We'd really like to probe new_sync_read() here, but it is typically
+# inlined. So, we'll probe its caller, __vfs_write().
+probe __vfs.__vfs_write = kernel.function("__vfs_write")
+{
+	# Skip the call if new_sync_write() wouldn't be called.
+	if ($file->f_op->write || !$file->f_op->write_iter) next
+}
+probe vfs.do_sync_write.return = kernel.function("do_sync_write").return !,
+	__vfs.__vfs_write.return
 {
 	name = "do_sync_write"
 	retstr = sprintf("%d", $return)
 
-	bytes_to_write = $len
-	pos = kernel_pointer($ppos)
+	bytes_to_write = @choose_defined($len, $count)
+	pos = kernel_pointer(@choose_defined($ppos, $pos))
 	ret = $return
 	bytes_written = $return > 0 ? $return : 0
 	error = $return < 0 ? $return : 0
@@ -685,6 +712,11 @@ probe vfs.do_sync_write.return = kernel.function("do_sync_write").return
 		size = $return
 		units = "bytes"
 	}
+}
+probe __vfs.__vfs_write.return = kernel.function("__vfs_write").return
+{
+	# Skip the call if new_sync_write() wouldn't be called.
+	if ($file->f_op->write || !$file->f_op->write_iter) next
 }
 
 probe vfs.block_sync_page = kernel.function("block_sync_page") ?
@@ -1034,7 +1066,7 @@ probe _vfs.block_prepare_write = kernel.function("__block_write_begin") !,
 	page = $page
 	if (@defined($pos)) {
 		_inode = __page_ino($page)
-		from = $pos & (%{ PAGE_CACHE_SIZE  %} - 1)
+		from = $pos & (%{ /* pure */ PAGE_CACHE_SIZE  %} - 1)
 		to = from + $len		
 %(systemtap_v < "2.3" %?
 		# write_from and write_upto are deprecated
@@ -1067,7 +1099,7 @@ probe _vfs.block_prepare_write.return =
 	page = $page
 	if (@defined($pos)) {
 		_inode = __page_ino($page)
-		from = $pos & (%{ PAGE_CACHE_SIZE  %} - 1)
+		from = $pos & (%{ /* pure */ PAGE_CACHE_SIZE  %} - 1)
 		to = from + $len		
 %(systemtap_v < "2.3" %?
 		# write_from and write_upto are deprecated
@@ -1146,4 +1178,28 @@ probe _vfs.block_write_end.return = kernel.function("block_write_end").return ?
 	page = $page
 	_inode = __address_inode($mapping)
 	ret = $return
+}
+
+
+probe vfs.open = kernel.function("vfs_open") ?
+{
+        name = "vfs.open"
+        path = $path
+        cred = $cred
+        pathname = fullpath_struct_path($path)
+        argstr = sprintf("%s, %p", pathname, $cred)
+}
+
+probe vfs.open.return = kernel.function("vfs_open").return ?
+{
+        name = "vfs.open"
+        retstr = sprintf("%d", $return)
+
+        ret = $return
+	error = $return < 0 ? $return : 0
+	error_str = error ? errno_str(error) : ""
+
+        path = $path
+        cred = $cred
+        pathname = fullpath_struct_path($path)
 }

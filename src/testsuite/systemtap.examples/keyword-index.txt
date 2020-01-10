@@ -1,6 +1,9 @@
 SYSTEMTAP EXAMPLES INDEX BY KEYWORD
 (see also index.txt)
 
+
+For systemtap version 2.9.
+
 = _BEST =
 
 general/eventcount.stp - Count Specified Events
@@ -49,6 +52,17 @@ keywords: _best monitoring
   '$$vars' -c "sleep 1"
 
 
+general/whythefail.stp - Why did the function fail?
+keywords: speculation monitoring function trace _best
+
+  The whythefail.stp script prints a statement-execution trace for a
+  given function, but only for those runs of the function that ended up
+  with a (configurable) post-return condition.
+
+  # stap whythefail.stp kernel sys_open '$return < 0' -c 'cat \
+  /root/no-such-file || true'
+
+
 network/netfilter_summary.stp - System-Wide Count of Network Packets by IPs
 keywords: _best network traffic
 
@@ -60,6 +74,17 @@ keywords: _best network traffic
   pairs.
 
   # stap netfilter_summary.stp -c "sleep 1"
+
+
+network/netfilter_summary_json.stp - System-Wide Count of Network Packets by IPs
+keywords: _best network traffic json
+
+  The script watches all IPv4 network traffic on the system. The data
+  is output in JSON format and includes the number of packets sent
+  along source IP address / destination IP address pair encountered,
+  and the total number of bytes sent among the pair.
+
+  # stap netfilter_summary_json.stp -c "sleep 1"
 
 
 process/cycle_thief.stp - Track IRQ's and Other Processes Stealing Cycles from a Task
@@ -75,6 +100,18 @@ keywords: _best process scheduler time tracepoint interrupt
   the task was running.
 
   # stap cycle_thief.stp -c "sleep 1"
+
+
+process/proctop.stp - Periodically Print Process Information With History
+keywords: process scheduler _best
+
+  Every 5 seconds, print out a list of 25 processes that took the most
+  system time with information about the processes. Includes
+  information on processes that may have exited while the script was
+  running. The script contains configuration options listed in the
+  script source.
+
+  # stap proctop.stp -c "sleep 1"
 
 
 process/strace.stp - Trace system calls
@@ -412,7 +449,8 @@ keywords: io monitoring disk
   first few sectors of a raw block device.
 
   # stap mbrwatch.stp -c "dd of=/dev/null count=1 if=/dev/`grep -v major \
-  /proc/partitions | grep . | awk '{print $4}' | head -1`"
+  /proc/partitions | grep . | grep -v 'sr[0-9]' | awk '{print $4}' | \
+  head -1`"
 
 
 network/nfsd_unlink.stp - Find Which Client Is Removing NFS Files on Server
@@ -536,6 +574,17 @@ keywords: function statistics
   times.
 
   # stap func_time_stats.stp 'syscall.nanosleep' -c "sleep 1"
+
+
+general/whythefail.stp - Why did the function fail?
+keywords: speculation monitoring function trace _best
+
+  The whythefail.stp script prints a statement-execution trace for a
+  given function, but only for those runs of the function that ended up
+  with a (configurable) post-return condition.
+
+  # stap whythefail.stp kernel sys_open '$return < 0' -c 'cat \
+  /root/no-such-file || true'
 
 
 profiling/functioncallcount.stp - Count Times Functions Are Called
@@ -844,7 +893,8 @@ keywords: io monitoring disk
   first few sectors of a raw block device.
 
   # stap mbrwatch.stp -c "dd of=/dev/null count=1 if=/dev/`grep -v major \
-  /proc/partitions | grep . | awk '{print $4}' | head -1`"
+  /proc/partitions | grep . | grep -v 'sr[0-9]' | awk '{print $4}' | \
+  head -1`"
 
 
 io/nfs_func_users.stp - Tally the Number of NFS Functions Used by Each Process
@@ -857,6 +907,25 @@ keywords: io profiling
   total number of NFS functions called by the process.
 
   # stap nfs_func_users.stp -c "sleep 1"
+
+
+io/slowvfs.stp - Trace slow vfs opens.
+keywords: io
+
+  This script prints a line for every kernel vfs_open operation that
+  takes longer than a configurable number of microseconds.  Highly
+  contended or remote filesystems are likelier to hit this.
+
+  # stap slowvfs.stp -G sloth=10 -c 'find /proc >/dev/null'
+
+
+io/switchfile.stp - Switch log files
+keywords: io
+
+  Every second print a log message and switch log files every 5
+  seconds.
+
+  # stap -o switchfile.stp.out switchfile.stp -c "sleep 8"
 
 
 io/traceio.stp - Track Cumulative IO Activity by Process Name
@@ -1003,6 +1072,28 @@ keywords: virtualization qemu kvm io
   # stap qemu_io.stp -c "sleep 1"
 
 
+= JSON =
+
+network/net_xmit_json.stp - Tracks time between packet queue and transmit.
+keywords: network statistics json
+
+  This script tracks time between packet queue and transmit. The
+  information is provided to userspace via procfs in JSON format.
+
+  # stap net_xmit_json.stp -c "sleep 1"
+
+
+network/netfilter_summary_json.stp - System-Wide Count of Network Packets by IPs
+keywords: _best network traffic json
+
+  The script watches all IPv4 network traffic on the system. The data
+  is output in JSON format and includes the number of packets sent
+  along source IP address / destination IP address pair encountered,
+  and the total number of bytes sent among the pair.
+
+  # stap netfilter_summary_json.stp -c "sleep 1"
+
+
 = KVM =
 
 virtualization/kvm_service_time.stp - Time Statistics on KVM Exit Reasons
@@ -1074,12 +1165,16 @@ keywords: locking
 
   The bkl.stp script can help determine whether the Big Kernel Lock
   (BKL) is causing serialization on a multiprocessor system due to
-  excessive contention of the BKL. The bkl.stp script takes one
-  argument which is the number of processes waiting for the Big Kernel
+  excessive contention of the BKL. The bkl.stp script takes two
+  arguments. The first one is optional, and used to enable backtraces,
+  and print them once a process has been holding the BKL for a user
+  specified number of nseconds is reached. The second option is
+  compulsory and is the number of processes waiting for the Big Kernel
   Lock (BKL). When the number of processes waiting for the BKL is
   reached or exceeded, the script will print a time stamp, the number
   of processes waiting for the BKL, the holder of the BKL, and the
-  amount of time the BKL was held.
+  amount of time the BKL was held. If backtraces are enabled, a
+  backtrace will be printed as well.
 
   # stap bkl.stp -c "sleep 1" 1
 
@@ -1323,6 +1418,17 @@ keywords: _best monitoring
   '$$vars' -c "sleep 1"
 
 
+general/whythefail.stp - Why did the function fail?
+keywords: speculation monitoring function trace _best
+
+  The whythefail.stp script prints a statement-execution trace for a
+  given function, but only for those runs of the function that ended up
+  with a (configurable) post-return condition.
+
+  # stap whythefail.stp kernel sys_open '$return < 0' -c 'cat \
+  /root/no-such-file || true'
+
+
 io/mbrwatch.stp - Monitor Read/Write of the Boot Sector Area of Block Devices
 keywords: io monitoring disk
 
@@ -1330,7 +1436,8 @@ keywords: io monitoring disk
   first few sectors of a raw block device.
 
   # stap mbrwatch.stp -c "dd of=/dev/null count=1 if=/dev/`grep -v major \
-  /proc/partitions | grep . | awk '{print $4}' | head -1`"
+  /proc/partitions | grep . | grep -v 'sr[0-9]' | awk '{print $4}' | \
+  head -1`"
 
 
 io/ttyspy.stp - Monitor TTY Typing
@@ -1420,6 +1527,15 @@ keywords: network tracepoint socket
   # stap dropwatch.stp -c "sleep 1"
 
 
+network/net_xmit_json.stp - Tracks time between packet queue and transmit.
+keywords: network statistics json
+
+  This script tracks time between packet queue and transmit. The
+  information is provided to userspace via procfs in JSON format.
+
+  # stap net_xmit_json.stp -c "sleep 1"
+
+
 network/netdev.stp - Trace Activity on Network Devices
 keywords: network device traffic
 
@@ -1452,6 +1568,17 @@ keywords: _best network traffic
   pairs.
 
   # stap netfilter_summary.stp -c "sleep 1"
+
+
+network/netfilter_summary_json.stp - System-Wide Count of Network Packets by IPs
+keywords: _best network traffic json
+
+  The script watches all IPv4 network traffic on the system. The data
+  is output in JSON format and includes the number of packets sent
+  along source IP address / destination IP address pair encountered,
+  and the total number of bytes sent among the pair.
+
+  # stap netfilter_summary_json.stp -c "sleep 1"
 
 
 network/nettop.stp - Periodic Listing of Processes Using Network Interfaces
@@ -1498,6 +1625,16 @@ keywords: network socket
   "-h" option lists socktop script's filtering options.
 
   # ./socktop -c 1
+
+
+network/stp_dump.stp - Dump of STP packets
+keywords: network traffic
+
+  The stp_dump.stp prints out the packet contents. Each block contains
+  the STP protocol ID, version ID, flags, root and bridge MAC
+  addresses, and various times.
+
+  # stap stp_dump.stp -c "sleep 5"
 
 
 network/tcp_connections.stp - Track Creation of Incoming TCP Connections
@@ -1591,7 +1728,7 @@ keywords: nfs statistics
 
   The nfsdtop.stp script gathers and displays NFS lookups,
 
-  # stap nfsd_unlink.stp -c "sleep 1"
+  # stap nfsdtop.stp -c "sleep 1"
 
 
 = NUMA =
@@ -1761,6 +1898,18 @@ keywords: process monitoring syscall tracepoint
   script does not require debuginfo.
 
   # stap procmod_watcher.stp -c "sleep 1"
+
+
+process/proctop.stp - Periodically Print Process Information With History
+keywords: process scheduler _best
+
+  Every 5 seconds, print out a list of 25 processes that took the most
+  system time with information about the processes. Includes
+  information on processes that may have exited while the script was
+  running. The script contains configuration options listed in the
+  script source.
+
+  # stap proctop.stp -c "sleep 1"
 
 
 process/psig.stp - Print Process File Descriptors
@@ -2200,6 +2349,18 @@ keywords: scheduler
   # stap migrate.stp -c "sleep 1" bash
 
 
+process/proctop.stp - Periodically Print Process Information With History
+keywords: process scheduler _best
+
+  Every 5 seconds, print out a list of 25 processes that took the most
+  system time with information about the processes. Includes
+  information on processes that may have exited while the script was
+  running. The script contains configuration options listed in the
+  script source.
+
+  # stap proctop.stp -c "sleep 1"
+
+
 process/schedtimes.stp - Track Time Processes Spend in Various States Using Tracepoints
 keywords: process scheduler time tracepoint
 
@@ -2454,6 +2615,19 @@ keywords: network tcp socket guru
   # stap -g tcp_init_cwnd.stp -c "sleep 1"
 
 
+= SPECULATION =
+
+general/whythefail.stp - Why did the function fail?
+keywords: speculation monitoring function trace _best
+
+  The whythefail.stp script prints a statement-execution trace for a
+  given function, but only for those runs of the function that ended up
+  with a (configurable) post-return condition.
+
+  # stap whythefail.stp kernel sys_open '$return < 0' -c 'cat \
+  /root/no-such-file || true'
+
+
 = STAPGAMES =
 
 stapgames/2048.stp - 2048
@@ -2560,6 +2734,15 @@ keywords: memory slab statistics
   # stap vm.tracepoints.stp -c "sleep 10"
 
 
+network/net_xmit_json.stp - Tracks time between packet queue and transmit.
+keywords: network statistics json
+
+  This script tracks time between packet queue and transmit. The
+  information is provided to userspace via procfs in JSON format.
+
+  # stap net_xmit_json.stp -c "sleep 1"
+
+
 network/nfsd-recent.stp - Keep track of NFS server statistics
 keywords: nfs statistics
 
@@ -2576,7 +2759,7 @@ keywords: nfs statistics
 
   The nfsdtop.stp script gathers and displays NFS lookups,
 
-  # stap nfsd_unlink.stp -c "sleep 1"
+  # stap nfsdtop.stp -c "sleep 1"
 
 
 network/tcpipstat.stp - Display Network Statistics for Individual TCP Sockets
@@ -2862,6 +3045,17 @@ keywords: _best trace callgraph
   'kernel.function("vfs_read")' -c "cat /proc/sys/vm/* || true"
 
 
+general/whythefail.stp - Why did the function fail?
+keywords: speculation monitoring function trace _best
+
+  The whythefail.stp script prints a statement-execution trace for a
+  given function, but only for those runs of the function that ended up
+  with a (configurable) post-return condition.
+
+  # stap whythefail.stp kernel sys_open '$return < 0' -c 'cat \
+  /root/no-such-file || true'
+
+
 network/tcp_trace.stp - TCP Connection Tracing Utility
 keywords: network trace
 
@@ -2946,6 +3140,17 @@ keywords: _best network traffic
   # stap netfilter_summary.stp -c "sleep 1"
 
 
+network/netfilter_summary_json.stp - System-Wide Count of Network Packets by IPs
+keywords: _best network traffic json
+
+  The script watches all IPv4 network traffic on the system. The data
+  is output in JSON format and includes the number of packets sent
+  along source IP address / destination IP address pair encountered,
+  and the total number of bytes sent among the pair.
+
+  # stap netfilter_summary_json.stp -c "sleep 1"
+
+
 network/nettop.stp - Periodic Listing of Processes Using Network Interfaces
 keywords: network traffic
 
@@ -2955,6 +3160,16 @@ keywords: network traffic
   interval.
 
   # stap nettop.stp -c "sleep 1"
+
+
+network/stp_dump.stp - Dump of STP packets
+keywords: network traffic
+
+  The stp_dump.stp prints out the packet contents. Each block contains
+  the STP protocol ID, version ID, flags, root and bridge MAC
+  addresses, and various times.
+
+  # stap stp_dump.stp -c "sleep 5"
 
 
 network/tcpdumplike.stp - Dump of Received UDP/TCP Packets

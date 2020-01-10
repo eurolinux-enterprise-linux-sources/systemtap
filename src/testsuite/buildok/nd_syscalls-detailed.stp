@@ -1,4 +1,4 @@
-#! stap -p4
+#! stap -Wp4
 
 probe nd_syscall.accept
 {
@@ -57,7 +57,7 @@ probe nd_syscall.add_key.return
 
 probe nd_syscall.adjtimex, nd_syscall.compat_adjtimex ?
 {
-	printf("%s, %s\n", name, argstr)
+	printf("%s, %s, %p, %s\n", name, argstr, buf_uaddr, buf_str)
 }
 probe nd_syscall.adjtimex.return, nd_syscall.compat_adjtimex.return ?
 {
@@ -95,6 +95,16 @@ probe nd_syscall.bind
 }
 
 probe nd_syscall.bind.return
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.bpf ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%s, %p, %u\n", cmd_str, attr_uaddr, size)
+}
+probe nd_syscall.bpf.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }
@@ -155,6 +165,16 @@ probe nd_syscall.chroot
 	printf("%s\n", path)
 }
 probe nd_syscall.chroot.return
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.clock_adjtime ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %s, %p\n", clk_id, clk_id_str, tx_uaddr)
+}
+probe nd_syscall.clock_adjtime.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }
@@ -335,20 +355,24 @@ probe nd_syscall.eventfd.return ?
 probe nd_syscall.execve, nd_syscall.compat_execve ?
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%s, %s\n", filename, args)
+	printf("%s, %s, %s\n", filename, args, env_str)
 }
 probe nd_syscall.execve.return, nd_syscall.compat_execve.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }
 
-probe nd_syscall.execveat, nd_syscall.compat_execveat ?
+probe nd_syscall.execveat ?, nd_syscall.compat_execveat ?
 {
         printf("%s, %s\n", name, argstr)
-        printf("%d, %s, %s, %d(%s), %s\n", fd, fd_str, filename, flags, flags_str, args)
+%(systemtap_v <= "2.8" %?
+	printf("%d, %s\n", fd, fd_str)
+%)
+	printf("%d, %s, %s, %d(%s), %s, %s\n", dirfd, dirfd_str, filename,
+	       flags, flags_str, args, env_str)
 }
 
-probe nd_syscall.execveat.return, nd_syscall.compat_execveat.return ?
+probe nd_syscall.execveat.return ?, nd_syscall.compat_execveat.return ?
 {
         printf("%s, %s\n", name, retstr)
 }
@@ -378,16 +402,49 @@ probe nd_syscall.faccessat.return ?
 	printf("%s, %s\n", name, retstr)
 }
 
-# nd_syscall.compat_fadvise64 is actually arch-specfic, but testing it
-# here makes more sense.
+# nd_syscall.compat_fadvise64 and nd_syscall.compat_fadvise64_64 are
+# actually arch-specfic, but testing them here makes more sense.
 probe nd_syscall.fadvise64 ?, nd_syscall.fadvise64_64 ?,
-	nd_syscall.compat_fadvise64 ?
+	nd_syscall.compat_fadvise64 ?, nd_syscall.compat_fadvise64_64 ?
 {
 	printf("%s, %s\n", name, argstr)
 	printf("%d, %d, %d, %d\n", fd, offset, len, advice)
 }
 probe nd_syscall.fadvise64.return ?, nd_syscall.fadvise64_64.return ?,
-	nd_syscall.compat_fadvise64.return ?
+	nd_syscall.compat_fadvise64.return ?,
+	nd_syscall.compat_fadvise64_64.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.fallocate ?, nd_syscall.compat_fallocate ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %d, %#x, %u", fd, mode, offset, len)
+}
+probe nd_syscall.fallocate.return ?, nd_syscall.compat_fallocate.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.fanotify_init ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d(%s), %d(%s)", flags, flags_str, event_f_flags,
+	       event_f_flags_str)
+}
+probe nd_syscall.fanotify_init.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.fanotify_mark ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %d(%s), %d(%s), %d(%s), %s", fanotify_fd, flags, flags_str,
+	       mask, mask_str, dirfd, dirfd_str, pathname)
+}
+probe nd_syscall.fanotify_mark.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }
@@ -623,6 +680,16 @@ probe nd_syscall.futimesat.return ?, nd_syscall.compat_futimesat.return ?
 	printf("%s, %s\n", name, retstr)
 }
 
+probe nd_syscall.getcpu ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%p, %p, %p", cpu_uaddr, node_uaddr, tcache_uaddr)
+}
+probe nd_syscall.getcpu.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
 probe nd_syscall.getcwd
 {
 	printf("%s, %s\n", name, argstr)
@@ -804,6 +871,16 @@ probe nd_syscall.getrlimit
 	printf("%d, %p\n", resource, rlim_uaddr)
 }
 probe nd_syscall.getrlimit.return
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.get_robust_list
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %p, %p", pid, list_head_uaddr, len_uaddr)
+}
+probe nd_syscall.get_robust_list.return
 {
 	printf("%s, %s\n", name, retstr)
 }
@@ -1019,10 +1096,32 @@ probe nd_syscall.ioprio_set.return ?
 	printf("%s, %s\n", name, retstr)
 }
 
+probe nd_syscall.kcmp ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %d, %s, %u, %u", pid1, pid2, type_str, idx1, idx2)
+}
+probe nd_syscall.kcmp.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.kexec_file_load ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %d, %u, %s, %d(%s)", kernel_fd, initrd_fd, cmdline_len,
+	       cmdline, flags, flags_str)
+}
+probe nd_syscall.kexec_file_load.return ?
+{
+	printf("%s, %s\n", name, retstr)
+}
+
 probe nd_syscall.kexec_load ?
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%d, %d, %p, %d\n", entry, nr_segments, segments_uaddr, flags)
+	printf("%d, %u, %p, %d, %s\n", entry, nr_segments, segments_uaddr,
+               flags, flags_str)
 }
 probe nd_syscall.kexec_load.return ?
 {
@@ -1121,12 +1220,12 @@ probe nd_syscall.llseek.return ?
 	printf("%s, %s\n", name, retstr)
 }
 
-probe nd_syscall.lookup_dcookie
+probe nd_syscall.lookup_dcookie, nd_syscall.compat_lookup_dcookie ?
 {
 	printf("%s, %s\n", name, argstr)
 	printf("%d, %p, %d\n", cookie, buffer_uaddr, len)
 }
-probe nd_syscall.lookup_dcookie.return
+probe nd_syscall.lookup_dcookie.return, nd_syscall.compat_lookup_dcookie.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }

@@ -11,16 +11,6 @@
 %{!?elfutils_version: %global elfutils_version 0.142}
 %{!?pie_supported: %global pie_supported 1}
 %{!?with_boost: %global with_boost 0}
-%ifarch ppc ppc64 %{sparc} aarch64 ppc64le s390 s390x
-%{!?with_publican: %global with_publican 0}
-%else
-%{!?with_publican: %global with_publican 1}
-%endif
-%if 0%{?rhel}
-%{!?publican_brand: %global publican_brand RedHat}
-%else
-%{!?publican_brand: %global publican_brand fedora}
-%endif
 %ifarch %{ix86} x86_64 ppc ppc64
 %{!?with_dyninst: %global with_dyninst 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
 %else
@@ -40,8 +30,9 @@
 %{!?with_openssl: %global with_openssl 0}
 %endif
 %{!?with_pyparsing: %global with_pyparsing 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
+%{!?with_python3: %global with_python3 0%{?fedora} >= 23}
 
-%ifarch ppc64le
+%ifarch ppc64le aarch64
 %global with_virthost 0
 %endif
 
@@ -63,16 +54,13 @@
    %endif
 %endif
 
-%define dracutlibdir %{_prefix}/lib/dracut
-%define dracutstap %{dracutlibdir}/modules.d/99stap
+%define dracutstap %{_prefix}/lib/dracut/modules.d/99stap
 
 Name: systemtap
-Version: 2.7
-Release: 2%{?dist}
+Version: 2.9
+Release: 4%{?dist}
 # for version, see also configure.ac
 
-Patch10: xmlto-html-portable.patch
-Patch11: bz1195839.patch
 
 # Packaging abstract:
 #
@@ -104,6 +92,10 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Source: ftp://sourceware.org/pub/systemtap/releases/systemtap-%{version}.tar.gz
+
+Patch10: xmlto-colwidth.patch
+Patch11: systemtap-2.9-pr19525-bulk-sigusr2.patch
+Patch12: rhbz1319085.patch
 
 # Build*
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -144,14 +136,6 @@ BuildRequires: tex(fullpage.sty) tex(fancybox.sty) tex(bchr7t.tfm)
 # called 'xmlto-tex'.  To avoid a specific F10 BuildReq, we'll do a
 # file-based buildreq on '/usr/share/xmlto/format/fo/pdf'.
 BuildRequires: xmlto /usr/share/xmlto/format/fo/pdf
-%if %{with_publican}
-BuildRequires: publican
-BuildRequires: /usr/share/publican/Common_Content/%{publican_brand}/defaults.cfg
-
-# A workaround for BZ920216 which requires an X server to build docs
-# with publican.
-BuildRequires: /usr/bin/xvfb-run
-%endif
 %endif
 %if %{with_emacsvim}
 BuildRequires: emacs
@@ -281,7 +265,11 @@ Group: Development/System
 License: GPLv2+ and Public Domain
 URL: http://sourceware.org/systemtap/
 %if %{with_pyparsing}
+%if %{with_python3}
+Requires: python3-pyparsing
+%else
 Requires: pyparsing
+%endif
 %endif
 
 %description sdt-devel
@@ -308,7 +296,11 @@ Requires: strace
 # 'nmap-ncat'). So, we'll do a file-based require.
 Requires: /usr/bin/nc
 %ifnarch ia64 ppc64le aarch64
+%if 0%{?fedora} >= 21 || 0%{?rhel} >= 8
+# no prelink
+%else
 Requires: prelink
+%endif
 %endif
 # testsuite/systemtap.server/client.exp needs avahi
 Requires: avahi
@@ -393,6 +385,7 @@ systemtap-runtime-virthost machine to execute systemtap scripts.
 %setup -q %{?setup_elfutils}
 %patch10 -p1
 %patch11 -p1
+%patch12 -p1
 
 %if %{with_bundled_elfutils}
 cd elfutils-%{elfutils_version}
@@ -462,11 +455,6 @@ cd ..
 %global pie_config --disable-pie
 %endif
 
-%if %{with_publican}
-%global publican_config --enable-publican --with-publican-brand=%{publican_brand}
-%else
-%global publican_config --disable-publican
-%endif
 
 %if %{with_java}
 %global java_config --with-java=%{_jvmdir}/java
@@ -480,7 +468,19 @@ cd ..
 %global virt_config --disable-virt
 %endif
 
-%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{publican_config} %{rpm_config} %{java_config} %{virt_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
+%if %{with_dracut}
+%global dracut_config --with-dracutstap=%{dracutstap}
+%else
+%global dracut_config %{nil}
+%endif
+
+%if %{with_python3}
+%global python3_config --with-python3
+%else
+%global python3_config --without-python3
+%endif
+
+%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{rpm_config} %{java_config} %{virt_config} %{dracut_config} %{python3_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}" have_fop=no
 make %{?_smp_mflags}
 
 %if %{with_emacsvim}
@@ -524,9 +524,7 @@ cp -rp testsuite $RPM_BUILD_ROOT%{_datadir}/systemtap
 mkdir docs.installed
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/*.pdf docs.installed/
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/tapsets docs.installed/
-%if %{with_publican}
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/SystemTap_Beginners_Guide docs.installed/
-%endif
 %endif
 
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/stap-server
@@ -782,14 +780,10 @@ exit 0
 
 %if %{with_java}
 
-%triggerin runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
+%triggerin runtime-java -- java-1.8.0-openjdk, java-1.7.0-openjdk, java-1.6.0-openjdk
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64 ppc64le
-        %ifarch ppc64 ppc64le
-            arch=ppc64
-	%else
-	    arch=i386
-	%endif
+    %ifarch %{ix86}
+	arch=i386
     %else
         arch=`basename $f | cut -f2 -d_ | cut -f1 -d.`
     %endif
@@ -801,14 +795,10 @@ for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
     done
 done
 
-%triggerun runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
+%triggerun runtime-java -- java-1.8.0-openjdk, java-1.7.0-openjdk, java-1.6.0-openjdk
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64 ppc64le
-        %ifarch ppc64 ppc64le
-            arch=ppc64
-	%else
-	    arch=i386
-	%endif
+    %ifarch %{ix86}
+	arch=i386
     %else
         arch=`basename $f | cut -f2 -d_ | cut -f1 -d.`
     %endif
@@ -818,15 +808,11 @@ for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
     done
 done
 
-%triggerpostun runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
+%triggerpostun runtime-java -- java-1.8.0-openjdk, java-1.7.0-openjdk, java-1.6.0-openjdk
 # Restore links for any JDKs remaining after a package removal:
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64 ppc64le
-        %ifarch ppc64 ppc64le
-            arch=ppc64
-	%else
-	    arch=i386
-	%endif
+    %ifarch %{ix86}
+	arch=i386
     %else
         arch=`basename $f | cut -f2 -d_ | cut -f1 -d.`
     %endif
@@ -951,9 +937,7 @@ done
 %if %{with_docs}
 %doc docs.installed/*.pdf
 %doc docs.installed/tapsets/*.html
-%if %{with_publican}
 %doc docs.installed/SystemTap_Beginners_Guide
-%endif
 %endif
 %{_bindir}/stap
 %{_bindir}/stap-prep
@@ -962,6 +946,7 @@ done
 %{_mandir}/man1/stap-prep.1*
 %{_mandir}/man1/stap-merge.1*
 %{_mandir}/man1/stap-report.1*
+%{_mandir}/man1/stapref.1*
 %{_mandir}/man3/*
 %{_mandir}/man7/error*
 %{_mandir}/man7/stappaths.7*
@@ -1040,6 +1025,18 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Thu Mar 24 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-4
+- BZ1319085 (s390x udelay_simple) cont'd
+
+* Mon Mar 21 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-3
+- BZ1319085 (s390x udelay_simple)
+
+* Wed Feb 03 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-2
+- BZ1302425 (staprun SIGUSR2)
+
+* Tue Dec 08 2015 Frank Ch. Eigler <fche@redhat.com> - 2.9-1
+- Upstream release.
+
 * Thu Mar 26 2015 Frank Ch. Eigler <fche@redhat.com> - 2.7-2
 - bz1195839 (no execveat syscall)
 

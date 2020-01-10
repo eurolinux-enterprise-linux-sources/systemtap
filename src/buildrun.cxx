@@ -1,5 +1,5 @@
 // build/run probes
-// Copyright (C) 2005-2014 Red Hat Inc.
+// Copyright (C) 2005-2015 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -310,6 +310,7 @@ compile_pass (systemtap_session& s)
   o << "$(STAPCONF_HEADER):" << endl;
   o << "\t@echo -n > $@" << endl;
   output_autoconf(s, o, "autoconf-hrtimer-rel.c", "STAPCONF_HRTIMER_REL", NULL);
+  output_exportconf(s, o, "hrtimer_get_res", "STAPCONF_HRTIMER_GET_RES");
   output_autoconf(s, o, "autoconf-generated-compile.c", "STAPCONF_GENERATED_COMPILE", NULL);
   output_autoconf(s, o, "autoconf-hrtimer-getset-expires.c", "STAPCONF_HRTIMER_GETSET_EXPIRES", NULL);
   output_autoconf(s, o, "autoconf-inode-private.c", "STAPCONF_INODE_PRIVATE", NULL);
@@ -376,14 +377,16 @@ compile_pass (systemtap_session& s)
   output_exportconf(s, o, "proc_create_data", "STAPCONF_PROC_CREATE_DATA");
   output_exportconf(s, o, "PDE_DATA", "STAPCONF_PDE_DATA");
   output_autoconf(s, o, "autoconf-module-sect-attrs.c", "STAPCONF_MODULE_SECT_ATTRS", NULL);
-
   output_autoconf(s, o, "autoconf-utrace-via-tracepoints.c", "STAPCONF_UTRACE_VIA_TRACEPOINTS", NULL);
+  output_autoconf(s, o, "autoconf-module-tracepoints.c", "STAPCONF_MODULE_TRACEPOINT", NULL);
   output_autoconf(s, o, "autoconf-task_work-struct.c", "STAPCONF_TASK_WORK_STRUCT", NULL);
   output_autoconf(s, o, "autoconf-vm-area-pte.c", "STAPCONF_VM_AREA_PTE", NULL);
   output_autoconf(s, o, "autoconf-relay-umode_t.c", "STAPCONF_RELAY_UMODE_T", NULL);
   output_autoconf(s, o, "autoconf-fs_supers-hlist.c", "STAPCONF_FS_SUPERS_HLIST", NULL);
   output_autoconf(s, o, "autoconf-compat_sigaction.c", "STAPCONF_COMPAT_SIGACTION", NULL);
   output_autoconf(s, o, "autoconf-netfilter.c", "STAPCONF_NETFILTER_V313", NULL);
+  output_autoconf(s, o, "autoconf-netfilter-313b.c", "STAPCONF_NETFILTER_V313B", NULL);
+  output_autoconf(s, o, "autoconf-netfilter-4_1.c", "STAPCONF_NETFILTER_V41", NULL);
   output_autoconf(s, o, "autoconf-smpcall-5args.c", "STAPCONF_SMPCALL_5ARGS", NULL);
   output_autoconf(s, o, "autoconf-smpcall-4args.c", "STAPCONF_SMPCALL_4ARGS", NULL);
 
@@ -422,6 +425,7 @@ compile_pass (systemtap_session& s)
   output_exportconf(s, o, "vmalloc_node", "STAPCONF_VMALLOC_NODE");
 
   output_autoconf(s, o, "autoconf-tracepoint-strings.c", "STAPCONF_TRACEPOINT_STRINGS", NULL);
+  output_autoconf(s, o, "autoconf-timerfd.c", "STAPCONF_TIMERFD_H", NULL);
 
   o << module_cflags << " += -include $(STAPCONF_HEADER)" << endl;
 
@@ -769,6 +773,12 @@ make_run_command (systemtap_session& s, const string& remotedir,
       staprun_cmd.push_back(lex_cast(s.target_pid));
     }
 
+  if (s.target_namespaces_pid)
+    {
+      staprun_cmd.push_back("-N");
+      staprun_cmd.push_back(lex_cast(s.target_namespaces_pid));
+    }
+
   if (s.buffer_size)
     {
       staprun_cmd.push_back("-b");
@@ -851,6 +861,9 @@ make_tracequeries(systemtap_session& s, const map<string,string>& contents)
   omf << "EXTRA_CFLAGS := -g -Wno-implicit-function-declaration" << (s.omit_werror ? "" : " -Werror") << endl;
   // RHBZ 655231: later rhel6 kernels' module-signing kbuild logic breaks out-of-tree modules
   omf << "CONFIG_MODULE_SIG := n" << endl;
+
+  // PR18389: disable GCC's Identical Code Folding, since the stubs may look identical
+  omf << "EXTRA_CFLAGS += $(call cc-option,-fno-ipa-icf)" << endl;
 
   if (s.kernel_source_tree != "")
     omf << "EXTRA_CFLAGS += -I" + s.kernel_source_tree << endl;

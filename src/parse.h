@@ -15,6 +15,8 @@
 #include <vector>
 #include <iostream>
 #include <stdexcept>
+#include "stringtable.h"
+
 
 struct stapfile;
 struct probe;
@@ -24,6 +26,8 @@ struct source_loc
   stapfile* file;
   unsigned line;
   unsigned column;
+public:
+  source_loc(): file(0), line(0), column(0) {}
 };
 
 std::ostream& operator << (std::ostream& o, const source_loc& loc);
@@ -44,18 +48,19 @@ enum token_type
 struct token
 {
   source_loc location;
-  token_type type;
-  std::string content;
-  std::string msg; // for tok_junk
-  void make_junk (std::string msg);
+  interned_string content;
+  std::string msg; // for tok_junk, more efficient than interned_string if empty
   const token* chain; // macro invocation that produced this token
+  token_type type;
+  
+  void make_junk (const std::string& msg);
   friend class parser;
   friend class lexer;
 private:
-  token(): chain(0) {}
+  token(): chain(0), type(tok_junk) {}
   token(const token& other):
-    location(other.location), type(other.type), content(other.content),
-    msg(other.msg), chain(other.chain) {}
+    location(other.location), content(other.content),
+    msg(other.msg), chain(other.chain), type(other.type) {}
 };
 
 

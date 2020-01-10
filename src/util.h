@@ -30,6 +30,7 @@ extern "C" {
 }
 
 #include "privilege.h"
+#include "stringtable.h"
 
 #if ENABLE_NLS
 #define _(string) gettext(string)
@@ -96,6 +97,8 @@ int regexp_match (const std::string& value, const std::string& re, std::vector<s
 bool contains_glob_chars (const std::string &str);
 std::string escape_glob_chars (const std::string& str);
 std::string unescape_glob_chars (const std::string& str);
+bool identifier_string_needs_escape (const std::string& str);
+std::string escaped_indentifier_string (const std::string& str);
 std::string kernel_release_from_build_tree (const std::string &kernel_build_tree, int verbose = 0);
 std::string normalize_machine(const std::string& machine);
 int elf_class_from_normalized_machine(const std::string& machine);
@@ -268,7 +271,6 @@ startswith(const std::string & s, const std::string & prefix)
   return (s.compare(0, prefix.length(), prefix) == 0);
 }
 
-
 // Returns whether a string ends with the given suffix
 inline bool
 endswith(const std::string & s, const char * suffix)
@@ -339,6 +341,11 @@ unsigned levenshtein(const std::string& a, const std::string& b);
 // of 'threshold'.
 std::string levenshtein_suggest(const std::string& target,
                                 const std::set<std::string>& elems,
+                                unsigned max = std::numeric_limits<unsigned>::max(),
+                                unsigned threshold = std::numeric_limits<unsigned>::max());
+
+std::string levenshtein_suggest(const std::string& target,
+                                const std::set<interned_string>& elems,
                                 unsigned max = std::numeric_limits<unsigned>::max(),
                                 unsigned threshold = std::numeric_limits<unsigned>::max());
 

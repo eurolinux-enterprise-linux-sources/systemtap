@@ -21,6 +21,7 @@
 #include "runtime/k_syms.h"
 #include "dwflpp.h"
 #include "stapregex.h"
+#include "stringtable.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -54,6 +55,7 @@ extern "C" {
 #define STAP_T_05 _("\"aggregation overflow in ")
 #define STAP_T_06 _("\"empty aggregate\";")
 #define STAP_T_07 _("\"histogram index out of range\";")
+
 using namespace std;
 
 class var;
@@ -103,7 +105,6 @@ struct c_unparser: public unparser, public visitor
   void emit_lock_decls (const varuse_collecting_visitor& v);
   void emit_locks ();
   void emit_probe (derived_probe* v);
-  void emit_probe_condition_initialize(derived_probe* v);
   void emit_probe_condition_update(derived_probe* v);
   void emit_unlocks ();
 
@@ -229,6 +230,8 @@ struct c_tmpcounter:
   void load_aggregate (expression *e);
 
   void visit_block (block *s);
+  void visit_try_block (try_block* s);
+  void visit_if_statement (if_statement* s);
   void visit_for_loop (for_loop* s);
   void visit_foreach_loop (foreach_loop* s);
   // void visit_return_statement (return_statement* s);
@@ -250,23 +253,30 @@ struct c_tmpcounter:
   void visit_functioncall (functioncall* e);
   void visit_print_format (print_format* e);
   void visit_stat_op (stat_op* e);
+
+  void wrap_visit_in_struct (expression *e);
+  void wrap_visit_in_struct (statement *s);
+  void start_struct_def (std::ostream::pos_type &before,
+                         std::ostream::pos_type &after, const token* tok);
+  void close_struct_def (std::ostream::pos_type before,
+                         std::ostream::pos_type after);
 };
 
 struct c_unparser_assignment:
   public throwing_visitor
 {
   c_unparser* parent;
-  string op;
+  interned_string op;
   expression* rvalue;
   bool post; // true == value saved before modify operator
-  c_unparser_assignment (c_unparser* p, const string& o, expression* e):
+  c_unparser_assignment (c_unparser* p, interned_string o, expression* e):
     throwing_visitor ("invalid lvalue type"),
     parent (p), op (o), rvalue (e), post (false) {}
-  c_unparser_assignment (c_unparser* p, const string& o, bool pp):
+  c_unparser_assignment (c_unparser* p, interned_string o, bool pp):
     throwing_visitor ("invalid lvalue type"),
     parent (p), op (o), rvalue (0), post (pp) {}
 
-  void prepare_rvalue (string const & op,
+  void prepare_rvalue (interned_string op,
 		       tmpvar & rval,
 		       token const*  tok);
 
@@ -286,10 +296,10 @@ struct c_tmpcounter_assignment:
 // leave throwing for illegal lvalues to the c_unparser_assignment instance
 {
   c_tmpcounter* parent;
-  const string& op;
+  interned_string op;
   expression* rvalue;
   bool post; // true == value saved before modify operator
-  c_tmpcounter_assignment (c_tmpcounter* p, const string& o, expression* e, bool pp = false):
+  c_tmpcounter_assignment (c_tmpcounter* p, interned_string o, expression* e, bool pp = false):
     parent (p), op (o), rvalue (e), post (pp) {}
 
   void prepare_rvalue (tmpvar & rval);
@@ -1028,6 +1038,16 @@ c_unparser::emit_common_header ()
           c_tmpcounter ct (this);
           dp->body->visit (& ct);
 
+          // finish by visiting conditions of affected probes to match
+          // c_unparser::emit_probe()
+          if (!dp->probes_with_affected_conditions.empty())
+            {
+              for (set<derived_probe*>::const_iterator
+                    it  = dp->probes_with_affected_conditions.begin();
+                    it != dp->probes_with_affected_conditions.end(); ++it)
+                (*it)->sole_location()->condition->visit(& ct);
+            }
+
           o->newline(-1) << "} " << dp->name << ";";
         }
     }
@@ -1159,7 +1179,6 @@ c_unparser::emit_common_header ()
       o->newline(-1)  << "}";
 
       o->newline( 0)  << "#ifdef STP_ON_THE_FLY_TIMER_ENABLE";
-      o->newline( 0)  << "#include <linux/hrtimer.h>";
       o->newline( 0)  << "#include \"timer.h\"";
       o->newline( 0)  << "static struct hrtimer module_refresh_timer;";
 
@@ -1177,8 +1196,10 @@ c_unparser::emit_common_header ()
       o->newline( 0)  <<   "            ktime_set(0, STP_ON_THE_FLY_INTERVAL))); ";
       o->newline( 0)  <<   "return HRTIMER_RESTART;";
       o->newline(-1)  << "}";
-      o->newline( 0)  << "#endif /* STP_ON_THE_FLY_ENABLE */";
+      o->newline( 0)  << "#endif /* STP_ON_THE_FLY_TIMER_ENABLE */";
     }
+
+  o->newline(0) << "#include \"namespaces.h\"";
 
   o->newline();
 }
@@ -1926,10 +1947,6 @@ c_unparser::emit_module_init ()
       o->newline() << "#endif";
     }
 
-  // Initialize probe conditions
-  for (unsigned i=0; i<session->probes.size(); i++)
-    emit_probe_condition_initialize(session->probes[i]);
-
   // Run all probe registrations.  This actually runs begin probes.
 
   for (unsigned i=0; i<g.size(); i++)
@@ -2456,6 +2473,7 @@ c_unparser::emit_function (functiondecl* v)
       break;
     }
 
+  o->newline() << "#define STAP_PRINTF(fmt, ...) do { _stp_printf(fmt, ##__VA_ARGS__); } while (0)";
   o->newline() << "#define STAP_ERROR(...) do { snprintf(CONTEXT->error_buffer, MAXSTRINGLEN, __VA_ARGS__); CONTEXT->last_error = CONTEXT->error_buffer; goto out; } while (0)";
   o->newline() << "#define return goto out"; // redirect embedded-C return
 
@@ -2472,6 +2490,7 @@ c_unparser::emit_function (functiondecl* v)
 
   v->body->visit (this);
   o->newline() << "#undef return";
+  o->newline() << "#undef STAP_PRINTF";
   o->newline() << "#undef STAP_ERROR";
   o->newline() << "#undef STAP_RETURN";
 
@@ -2691,26 +2710,6 @@ c_unparser::emit_probe (derived_probe* v)
 
   this->current_probe = 0;
   this->already_checked_action_count = false;
-}
-
-// Initializes the cond_enabled field by evaluating condition predicate.
-void
-c_unparser::emit_probe_condition_initialize(derived_probe* v)
-{
-  unsigned i = v->session_index;
-  assert(i < session->probes.size());
-
-  expression *cond = v->sole_location()->condition;
-  string cond_enabled = "stap_probes[" + lex_cast(i) + "].cond_enabled";
-
-  // no condition --> always enabled (initialized via STAP_PROBE_INIT)
-  if (!cond)
-    return;
-
-  // turn general integer into boolean 0/1
-  o->newline() << cond_enabled << " = !!";
-  cond->visit(this);
-  o->line() << ";";
 }
 
 // Updates the cond_enabled field and sets need_module_refresh if it was
@@ -3342,7 +3341,7 @@ c_unparser::is_local(vardecl const *r, token const *tok)
   if (tok)
     throw SEMANTIC_ERROR (_("unresolved symbol"), tok);
   else
-    throw SEMANTIC_ERROR (_("unresolved symbol: ") + r->name);
+    throw SEMANTIC_ERROR (_("unresolved symbol: ") + (string)r->name);
 }
 
 
@@ -3368,7 +3367,7 @@ c_unparser::getvar(vardecl *v, token const *tok)
   else
     {
       statistic_decl sd;
-      std::map<std::string, statistic_decl>::const_iterator i;
+      std::map<interned_string, statistic_decl>::const_iterator i;
       i = session->stat_decls.find(v->name);
       if (i != session->stat_decls.end())
 	sd = i->second;
@@ -3383,7 +3382,7 @@ c_unparser::getmap(vardecl *v, token const *tok)
   if (v->arity < 1)
     throw SEMANTIC_ERROR(_("attempt to use scalar where map expected"), tok);
   statistic_decl sd;
-  std::map<std::string, statistic_decl>::const_iterator i;
+  std::map<interned_string, statistic_decl>::const_iterator i;
   i = session->stat_decls.find(v->name);
   if (i != session->stat_decls.end())
     sd = i->second;
@@ -3452,6 +3451,22 @@ c_unparser::visit_block (block *s)
 }
 
 
+void c_tmpcounter::visit_try_block (try_block *s)
+{
+  parent->o->newline() << "union { /* try_block: "
+                       << s->tok->location.file->name << ":"
+                       << lex_cast(s->tok->location.line) << " */";
+  parent->o->indent(1);
+
+  if (s->try_block)
+    wrap_visit_in_struct(s->try_block);
+  if (s->catch_error_var)
+    wrap_visit_in_struct(s->catch_error_var);
+  if (s->catch_block)
+    wrap_visit_in_struct(s->catch_block);
+
+  parent->o->newline(-1) << "};";
+}
 void c_unparser::visit_try_block (try_block *s)
 {
   record_actions(0, s->tok, true); // flush prior actions
@@ -3534,6 +3549,73 @@ c_unparser::visit_expr_statement (expr_statement *s)
 
 
 void
+c_tmpcounter::wrap_visit_in_struct (statement *s)
+{
+  std::ostream::pos_type before_struct_pos;
+  std::ostream::pos_type after_struct_pos;
+
+  start_struct_def(before_struct_pos, after_struct_pos, s->tok);
+  s->visit (this);
+  close_struct_def(before_struct_pos, after_struct_pos);
+}
+
+void
+c_tmpcounter::wrap_visit_in_struct (expression *e)
+{
+  std::ostream::pos_type before_struct_pos;
+  std::ostream::pos_type after_struct_pos;
+
+  start_struct_def(before_struct_pos, after_struct_pos, e->tok);
+  e->visit (this);
+  close_struct_def(before_struct_pos, after_struct_pos);
+}
+
+void
+c_tmpcounter::start_struct_def (std::ostream::pos_type &before,
+                                std::ostream::pos_type &after, const token* tok)
+{
+  // To avoid lots of empty structs, remember  where we are now.  Then,
+  // output the struct start and remember that positon.  If when we get
+  // done with the statement we haven't moved, then we don't really need
+  // the struct.  To get rid of the struct start we output, we'll seek back
+  // to where we were before we output the struct (done in ::close_struct_def).
+  before = parent->o->tellp();
+  parent->o->newline() << "struct { /* source: " << tok->location.file->name
+                         << ":" << lex_cast(tok->location.line) << " */";
+  parent->o->indent(1);
+  after = parent->o->tellp();
+}
+
+void
+c_tmpcounter::close_struct_def (std::ostream::pos_type before,
+                                std::ostream::pos_type after)
+{
+  // meant to be used with ::start_struct_def. remove the struct if empty.
+  parent->o->indent(-1);
+  if (after == parent->o->tellp())
+    parent->o->seekp(before);
+  else
+    parent->o->newline() << "};";
+}
+
+void
+c_tmpcounter::visit_if_statement (if_statement *s)
+{
+  parent->o->newline() << "union { /* if_statement: "
+                       << s->tok->location.file->name << ":"
+                       << lex_cast(s->tok->location.line) << " */";
+  parent->o->indent(1);
+
+  wrap_visit_in_struct(s->condition);
+  wrap_visit_in_struct(s->thenblock);
+
+  if (s->elseblock)
+    wrap_visit_in_struct(s->elseblock);
+
+  parent->o->newline(-1) << "};";
+}
+
+void
 c_unparser::visit_if_statement (if_statement *s)
 {
   record_actions(1, s->tok, true);
@@ -3564,37 +3646,29 @@ c_tmpcounter::visit_block (block *s)
   // temporary variable slots, since temporaries don't survive
   // statement boundaries.  So we use gcc's anonymous union/struct
   // facility to explicitly overlay the temporaries.
-  parent->o->newline() << "union {";
+  parent->o->newline() << "union { /* block_statement: "
+                       << s->tok->location.file->name << ":"
+                       << lex_cast(s->tok->location.line) << " */";
   parent->o->indent(1);
   for (unsigned i=0; i<s->statements.size(); i++)
-    {
-      // To avoid lots of empty structs inside the union, remember
-      // where we are now.  Then, output the struct start and remember
-      // that positon.  If when we get done with the statement we
-      // haven't moved, then we don't really need the struct.  To get
-      // rid of the struct start we output, we'll seek back to where
-      // we were before we output the struct.
-      std::ostream::pos_type before_struct_pos = parent->o->tellp();
-      parent->o->newline() << "struct {";
-      parent->o->indent(1);
-      std::ostream::pos_type after_struct_pos = parent->o->tellp();
-      s->statements[i]->visit (this);
-      parent->o->indent(-1);
-      if (after_struct_pos == parent->o->tellp())
-	parent->o->seekp(before_struct_pos);
-      else
-	parent->o->newline() << "};";
-    }
+    wrap_visit_in_struct(s->statements[i]);
   parent->o->newline(-1) << "};";
 }
 
 void
 c_tmpcounter::visit_for_loop (for_loop *s)
 {
-  if (s->init) s->init->visit (this);
-  s->cond->visit (this);
-  s->block->visit (this);
-  if (s->incr) s->incr->visit (this);
+  parent->o->newline() << "union { /* for_loop: "
+                       << s->tok->location.file->name << ":"
+                       << lex_cast(s->tok->location.line) << " */";
+  parent->o->indent(1);
+
+  if (s->init) wrap_visit_in_struct(s->init);
+  wrap_visit_in_struct(s->cond);
+  wrap_visit_in_struct(s->block);
+  if (s->incr) wrap_visit_in_struct(s->incr);
+
+  parent->o->newline(-1) << "};";
 }
 
 
@@ -3750,6 +3824,13 @@ c_tmpcounter::visit_foreach_loop (foreach_loop *s)
   symbol *array;
   hist_op *hist;
   classify_indexable (s->base, array, hist);
+
+  // tmpvar mem usage can't be optimized by wrapping the tmp declarations
+  // in a union like in ::visit_for_loop. this is because the tmps for
+  // the limit, and the mapvar+indexes (or aggvar) are used in multiple
+  // areas, such that they would need to be declared outside of the
+  // union. that leaves the body, which would need to be encased in a
+  // struct decl rendering the union useless.
 
   // Create a temporary for the loop limit counter and the limit
   // expression result.
@@ -4403,7 +4484,7 @@ c_unparser::visit_continue_statement (continue_statement* s)
 void
 c_unparser::visit_literal_string (literal_string* e)
 {
-  const string& v = e->value;
+  interned_string v = e->value;
   o->line() << '"';
   for (unsigned i=0; i<v.size(); i++)
     // NB: The backslash character is specifically passed through as is.
@@ -5079,7 +5160,7 @@ c_tmpcounter_assignment::visit_symbol (symbol *e)
 
 
 void
-c_unparser_assignment::prepare_rvalue (string const & op,
+c_unparser_assignment::prepare_rvalue (interned_string op,
 				       tmpvar & rval,
 				       token const * tok)
 {
@@ -5754,8 +5835,8 @@ preprocess_print_format(print_format* e, vector<tmpvar>& tmp,
       if (e->print_with_delim)
 	{
 	  stringstream escaped_delim;
-	  const string& dstr = e->delimiter.literal_string;
-	  for (string::const_iterator i = dstr.begin();
+	  interned_string dstr = e->delimiter.literal_string;
+	  for (interned_string::const_iterator i = dstr.begin();
 	       i != dstr.end(); ++i)
 	    {
 	      if (*i == '%')
@@ -7328,6 +7409,67 @@ dump_unwindsym_cxt (Dwfl_Module *m,
   return DWARF_CB_OK;
 }
 
+static void dump_kallsyms(unwindsym_dump_context *c)
+{
+  ifstream kallsyms("/proc/kallsyms");
+  unsigned stpmod_idx = c->stp_module_index;
+  string line;
+  unsigned size = 0;
+  Dwarf_Addr start = 0;
+  Dwarf_Addr end = 0;
+  Dwarf_Addr prev = 0;
+
+  c->output << "static struct _stp_symbol "
+            << "_stp_module_" << stpmod_idx << "_symbols_" << 0 << "[] = {\n";
+
+  while (getline(kallsyms, line))
+    {
+      Dwarf_Addr addr;
+      string name;
+      string module;
+      char type;
+      istringstream iss(line);
+
+      iss >> hex >> addr >> type >> name >> module;
+
+      if (name == KERNEL_RELOC_SYMBOL)
+        start = addr;
+      else if (name == "_end" || module != "")
+        {
+          end = prev;
+          break;
+        }
+
+      if (!start || addr == 0 || prev == addr)
+        continue;
+
+      c->output << "  { 0x" << hex << addr - start << dec
+			<< ", " << lex_cast_qstring(name) << " },\n";
+
+      size++;
+      prev = addr;
+    }
+
+  c->output << "};\n";
+  c->output << "static struct _stp_section _stp_module_" << stpmod_idx << "_sections[] = {\n";
+  c->output << "{\n"
+            << ".name = " << lex_cast_qstring(KERNEL_RELOC_SYMBOL) << ",\n"
+            << ".size = 0x" << hex << end - start << dec << ",\n"
+            << ".symbols = _stp_module_" << stpmod_idx << "_symbols_" << 0 << ",\n"
+            << ".num_symbols = " << size << ",\n";
+  c->output << "},\n";
+  c->output << "};\n";
+  c->output << "static struct _stp_module _stp_module_" << stpmod_idx << " = {\n";
+  c->output << ".name = " << lex_cast_qstring("kernel") << ",\n";
+  c->output << ".sections = _stp_module_" << stpmod_idx << "_sections" << ",\n";
+  c->output << ".num_sections = sizeof(_stp_module_" << stpmod_idx << "_sections)/"
+            << "sizeof(struct _stp_section),\n";
+  c->output << "};\n\n";
+
+  c->undone_unwindsym_modules.erase("kernel");
+  c->stp_module_index++;
+}
+
 static int
 dump_unwindsyms (Dwfl_Module *m,
                  void **userdata __attribute__ ((unused)),
@@ -7620,6 +7762,10 @@ emit_symbol_data (systemtap_session& s)
       dwfl_end(dwfl);
     }
 
+  // Use /proc/kallsyms if debuginfo not found.
+  if (ctx.undone_unwindsym_modules.find("kernel") != ctx.undone_unwindsym_modules.end())
+    dump_kallsyms(&ctx);
+
   emit_symbol_data_done (&ctx, s);
 }
 
@@ -7866,6 +8012,9 @@ translate_pass (systemtap_session& s)
       // Emit systemtap_module_refresh() prototype so we can reference it
       s.op->newline() << "static void systemtap_module_refresh (const char* modname);";
 
+      // Be sure to include runtime.h before any real code.
+      s.op->newline() << "#include \"runtime.h\"";
+
       if (!s.runtime_usermode_p())
         {
           // When on-the-fly [dis]arming is used, module_refresh can be called from
@@ -7883,8 +8032,6 @@ translate_pass (systemtap_session& s)
           s.op->newline() << "#define STP_ON_THE_FLY_TIMER_ENABLE";
           s.op->newline() << "#endif";
         }
-
-      s.op->newline() << "#include \"runtime.h\"";
 
       // Emit embeds ahead of time, in case they affect context layout
       for (unsigned i=0; i<s.embeds.size(); i++)

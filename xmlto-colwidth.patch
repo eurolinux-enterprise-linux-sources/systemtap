@@ -1,0 +1,39 @@
+commit b2cc280ec758359f1fae281c20f452fde3df7699
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Tue Dec 8 15:25:42 2015 -0500
+
+    stap docs: syscalls.xml table to use simpler colwidth
+    
+    Apparently some versions of xmlto / pdflatex or whatever choke on
+    the docbook-xml  colwidth="1*"  construct, so we use linear distances.
+
+diff --git a/doc/SystemTap_Tapset_Reference/syscalls.xmlpart b/doc/SystemTap_Tapset_Reference/syscalls.xmlpart
+index 02617f3..e903ef7 100644
+--- a/doc/SystemTap_Tapset_Reference/syscalls.xmlpart
++++ b/doc/SystemTap_Tapset_Reference/syscalls.xmlpart
+@@ -11,8 +11,8 @@ same convenience variables.
+     <para>
+     <table frame='all'><title>Syscalls list</title>
+     <tgroup cols='2' align='left' colsep='1' rowsep='1'>
+-    <colspec colname='c1' colwidth='25*' />
+-    <colspec colname='c2' colwidth='75*' />
++    <colspec colname='c1' colwidth='1.5in' />
++    <colspec colname='c2' colwidth='5in' />
+     <thead>
+     <row>
+       <entry>syscall</entry>
+diff --git a/scripts/update-syscall-docs b/scripts/update-syscall-docs
+index d52a5c3..8fc3a04 100755
+--- a/scripts/update-syscall-docs
++++ b/scripts/update-syscall-docs
+@@ -40,8 +40,8 @@ def getXmlContent(body):
+     <para>
+     <table frame='all'><title>Syscalls list</title>
+     <tgroup cols='2' align='left' colsep='1' rowsep='1'>
+-    <colspec colname='c1' colwidth='25*' />
+-    <colspec colname='c2' colwidth='75*' />
++    <colspec colname='c1' colwidth='1.5in' />
++    <colspec colname='c2' colwidth='5in' />
+     <thead>
+     <row>
+       <entry>syscall</entry>

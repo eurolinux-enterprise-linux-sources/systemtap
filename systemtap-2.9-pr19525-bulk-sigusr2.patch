@@ -1,0 +1,85 @@
+commit 3eedfda1fed73f15d7737c77fec9fe60a9b38fa2
+Author: Josh Stone <jistone@redhat.com>
+Date:   Wed Jan 27 14:20:06 2016 -0800
+
+    PR19525: always use a SIGUSR2 handler in stapio
+    
+    It was conditionally ignored by commit 62d2a73ee995, to avoid confusing
+    error messages about file rotation when there's no output file.
+    
+    But bulk-mode close_relayfs() still needs the signal to cause EINTR on
+    the waiting threads, so SIG_IGN is too much.  Now we just return from
+    the handler immediately if there's no output file to rotate.
+    
+    Also add a SIGUSR2 test for the original error and with bulk mode.
+
+diff --git a/staprun/relay.c b/staprun/relay.c
+index e994cdec9f6d..010063dda687 100644
+--- a/staprun/relay.c
++++ b/staprun/relay.c
+@@ -212,7 +212,7 @@ error_out:
+ static void switchfile_handler(int sig)
+ {
+ 	int i;
+-	if (stop_threads)
++	if (stop_threads || !outfile_name)
+ 		return;
+ 	for (i = 0; i < ncpus; i++)
+ 		if (reader[i] && switch_file[i]) {
+@@ -355,7 +355,7 @@ int init_relayfs(void)
+ 	}
+ 
+         memset(&sa, 0, sizeof(sa));
+-        sa.sa_handler = outfile_name ? switchfile_handler : SIG_IGN;
++        sa.sa_handler = switchfile_handler;
+         sa.sa_flags = 0;
+         sigemptyset(&sa.sa_mask);
+         sigaction(SIGUSR2, &sa, NULL);
+diff --git a/testsuite/systemtap.base/sigusr2.exp b/testsuite/systemtap.base/sigusr2.exp
+new file mode 100644
+index 000000000000..76ec28a54f22
+--- /dev/null
++++ b/testsuite/systemtap.base/sigusr2.exp
+@@ -0,0 +1,18 @@
++# Check that SIGUSR2 doesn't cause errors when not using file rotation.
++#
++# It used to say something like:
++#   stapio:open_outfile:75: ERROR: -S is set without -o. Please file a bug report.
++#   ERROR: Couldn't open file for cpu 0, exiting.: Success
++
++
++set test "sigusr2"
++stap_run $srcdir/$subdir/$test.stp no_load $all_pass_string -g
++
++# PR19525: In bulk-mode (-b), close_relayfs() expects SIGUSR2 to cause EINTR on
++# the relay threads, so it can't be SIG_IGN.  But the output is written to
++# files for later stap-merge, so we can't use normal proc stap_run.
++# Just make sure it doesn't hang, at least.
++
++set result_string {}
++stap_run3 "$test bulk" $srcdir/$subdir/$test.stp -g -b -c true
++
+diff --git a/testsuite/systemtap.base/sigusr2.stp b/testsuite/systemtap.base/sigusr2.stp
+new file mode 100644
+index 000000000000..dd2cc485e4b6
+--- /dev/null
++++ b/testsuite/systemtap.base/sigusr2.stp
+@@ -0,0 +1,18 @@
++/*
++ * sigusr2.stp
++ *
++ * Check that SIGUSR2 doesn't cause errors when not using file rotation.
++ */
++
++probe begin
++{
++	println("systemtap starting probe")
++	raise(%{ SIGUSR2 %})
++}
++
++probe end
++{
++	println("systemtap ending probe")
++	println("systemtap test success")
++}
++

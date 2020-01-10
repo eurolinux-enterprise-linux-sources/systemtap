@@ -30,6 +30,8 @@ probe begin {
 	print (__sem_flags(0))
 	print (__get_argv(0,0))
 	print (__get_compat_argv(0,0))
+	print (__count_envp(0))
+	print (__count_compat_envp(0))
 
 %(systemtap_v <= "2.7" %?
 	print (_adjtx_mode_str(0))
@@ -73,6 +75,8 @@ probe begin {
 	print (_ptrace_event_name(0))
 	print (_wait_status_str(0))
 
+	print (_seccomp_op_str(0))
+	print (_bpf_cmd_str(0))
 	print (_seccomp_flags_str(0))
 	print (_msg_flags_str(0))
 %(systemtap_v <= "2.5" %?
@@ -154,9 +158,15 @@ probe begin {
 	print (_struct_sigaction_u(0))
 	print (_struct_sigaction32_u(0))
 	print (_struct_old_sigaction32_u(0))
+	print (_stp_sigmask_str(0))
 
 	print (irqflags_str(0))
 
+	print (_stp_struct_iovec_u(0))
+	print (_stp_struct_compat_iovec_u(0))
+	print (_stp_elf_notes_str(0))
+
+	print (__ptrace_request_str(0))
 	print (_ptrace_argstr(0,0,0,0))
 	print (_ptrace_return_geteventmsg_data(0,0))
 	# Implementation is in arch specific files but with compatible API.
@@ -180,4 +190,27 @@ probe begin {
 	print (_mempolicy_mode_str(0))
 	print (_finit_module_flags_str(0))
 	print (_prctl_argstr(0, 0, 0, 0, 0))
+	print (_stp_timerfd_flags_str(0))
+	print (_stp_fallocate_mode_str(0))
+	print (_sync_file_range_flags_str(0))
+	print (_stp_siginfo_u(0))
+	print (_stp_compat_siginfo_u(0))
+
+	print (_struct_tms_u(0))
+	print (_struct_sysinfo_u(0))
+	print (_kexec_flags_str(0))
+	print (_kexec_file_load_flags_str(0))
+
+	print (_stp_sigaltstack_u(0))
+	print (_stp_compat_sigaltstack_u(0))
+
+	print (_renameat2_flags_str(0))
+	print (_fanotify_init_flags_str(0))
+	print (_fanotify_mark_flags_str(0))
+	print (_fanotify_mark_mask_str(0))
+	print (_perf_event_open_flags_str(0))
+	print (_kcmp_type_str(0))
+	print (_struct_sched_attr_u(0))
+        print (_struct_compat_itimerspec_u(0))
+        print (_struct_compat_timex_u(0))
 }

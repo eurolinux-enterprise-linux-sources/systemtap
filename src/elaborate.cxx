@@ -1,5 +1,5 @@
 // elaboration functions
-// Copyright (C) 2005-2014 Red Hat Inc.
+// Copyright (C) 2005-2015 Red Hat Inc.
 // Copyright (C) 2008 Intel Corporation
 //
 // This file is part of systemtap, and is free software.  You can
@@ -16,6 +16,7 @@
 #include "util.h"
 #include "task_finder.h"
 #include "stapregex.h"
+#include "stringtable.h"
 
 extern "C" {
 #include <sys/utsname.h>
@@ -128,14 +129,18 @@ derived_probe::collect_derivation_pp_chain (std::vector<probe_point*> &pp_list) 
 
 
 string
-derived_probe::derived_locations ()
+derived_probe::derived_locations (bool firstFrom)
 {
   ostringstream o;
   vector<probe_point*> reference_point;
   collect_derivation_pp_chain(reference_point);
   if (reference_point.size() > 0)
     for(unsigned i=1; i<reference_point.size(); ++i)
-      o << " from: " << reference_point[i]->str(false); // no ?,!,etc
+      {
+        if (firstFrom || i>1)
+          o << " from: ";
+        o << reference_point[i]->str(false); // no ?,!,etc
+      }
   return o.str();
 }
 
@@ -222,8 +227,7 @@ void
 derived_probe_builder::build_with_suffix(systemtap_session & sess,
                                          probe * use,
                                          probe_point * location,
-                                         std::map<std::string, literal *>
-                                           const & parameters,
+                                         literal_map_t const & parameters,
                                          std::vector<derived_probe *>
                                            & finished_results,
                                          std::vector<probe_point::component *>
@@ -237,11 +241,11 @@ derived_probe_builder::build_with_suffix(systemtap_session & sess,
 }
 
 bool
-derived_probe_builder::get_param (std::map<std::string, literal*> const & params,
-                                  const std::string& key,
-                                  std::string& value)
+derived_probe_builder::get_param (literal_map_t const & params,
+                                  interned_string key,
+                                  interned_string& value)
 {
-  map<string, literal *>::const_iterator i = params.find (key);
+  literal_map_t::const_iterator i = params.find (key);
   if (i == params.end())
     return false;
   literal_string * ls = dynamic_cast<literal_string *>(i->second);
@@ -253,11 +257,11 @@ derived_probe_builder::get_param (std::map<std::string, literal*> const & params
 
 
 bool
-derived_probe_builder::get_param (std::map<std::string, literal*> const & params,
-                                  const std::string& key,
+derived_probe_builder::get_param (literal_map_t const & params,
+                                  interned_string key,
                                   int64_t& value)
 {
-  map<string, literal *>::const_iterator i = params.find (key);
+  literal_map_t::const_iterator i = params.find (key);
   if (i == params.end())
     return false;
   if (i->second == NULL)
@@ -271,16 +275,16 @@ derived_probe_builder::get_param (std::map<std::string, literal*> const & params
 
 
 bool
-derived_probe_builder::has_null_param (std::map<std::string, literal*> const & params,
-                                       const std::string& key)
+derived_probe_builder::has_null_param (literal_map_t const & params,
+                                       interned_string key)
 {
-  map<string, literal *>::const_iterator i = params.find(key);
+  literal_map_t::const_iterator i = params.find(key);
   return (i != params.end() && i->second == NULL);
 }
 
 bool
-derived_probe_builder::has_param (std::map<std::string, literal*> const & params,
-                                       const std::string& key)
+derived_probe_builder::has_param (literal_map_t const & params,
+                                  interned_string key)
 {
   return (params.find(key) != params.end());
 }
@@ -288,7 +292,7 @@ derived_probe_builder::has_param (std::map<std::string, literal*> const & params
 // ------------------------------------------------------------------------
 // Members of match_key.
 
-match_key::match_key(string const & n)
+match_key::match_key(interned_string n)
   : name(n),
     have_parameter(false),
     parameter_type(pe_unknown)
@@ -321,14 +325,15 @@ match_key::with_string()
 string
 match_key::str() const
 {
+  string n = name;
   if (have_parameter)
     switch (parameter_type)
       {
-      case pe_string: return name + "(string)";
-      case pe_long: return name + "(number)";
-      default: return name + "(...)";
+      case pe_string: return n + "(string)";
+      case pe_long: return n + "(number)";
+      default: return n + "(...)";
       }
-  return name;
+  return n;
 }
 
 bool
@@ -352,13 +357,13 @@ match_key::operator<(match_key const & other) const
 // wildcards are permitted too. See also util.h:contains_glob_chars
 
 static bool
-isglob(string const & str)
+isglob(interned_string str)
 {
   return(str.find('*') != str.npos);
 }
 
 static bool
-isdoubleglob(string const & str)
+isdoubleglob(interned_string str)
 {
   return(str.find("**") != str.npos);
 }
@@ -404,7 +409,7 @@ match_node::bind(derived_probe_builder * e)
 }
 
 match_node *
-match_node::bind(string const & k)
+match_node::bind(interned_string k)
 {
   return bind(match_key(k));
 }
@@ -454,7 +459,7 @@ match_node::find_and_build (systemtap_session& s,
                                 loc->components.back()->tok);
 	}
 
-      map<string, literal *> param_map;
+      literal_map_t param_map;
       for (unsigned i=0; i<pos; i++)
         param_map[loc->components[i]->functor] = loc->components[i]->arg;
       // maybe 0
@@ -473,18 +478,18 @@ match_node::find_and_build (systemtap_session& s,
       // When faced with "foo**bar", we try "foo*bar" and "foo*.**bar"
 
       const probe_point::component *comp = loc->components[pos];
-      const string &functor = comp->functor;
+      string functor = comp->functor;
       size_t glob_start = functor.find("**");
       size_t glob_end = functor.find_first_not_of('*', glob_start);
-      const string prefix = functor.substr(0, glob_start);
-      const string suffix = ((glob_end != string::npos) ?
-                             functor.substr(glob_end) : "");
+      string prefix = functor.substr(0, glob_start);
+      string suffix = ((glob_end != string::npos) ?
+                           functor.substr(glob_end) : "");
 
       // Synthesize "foo*bar"
       probe_point *simple_pp = new probe_point(*loc);
-      simple_pp->from_glob = true;
       probe_point::component *simple_comp = new probe_point::component(*comp);
       simple_comp->functor = prefix + "*" + suffix;
+      simple_comp->from_glob = true;
       simple_pp->components[pos] = simple_comp;
       try
         {
@@ -507,12 +512,12 @@ match_node::find_and_build (systemtap_session& s,
       // Synthesize "foo*.**bar"
       // NB: any component arg should attach to the latter part only
       probe_point *expanded_pp = new probe_point(*loc);
-      expanded_pp->from_glob = true;
       probe_point::component *expanded_comp_pre = new probe_point::component(*comp);
       expanded_comp_pre->functor = prefix + "*";
+      expanded_comp_pre->from_glob = true;
       expanded_comp_pre->arg = NULL;
       probe_point::component *expanded_comp_post = new probe_point::component(*comp);
-      expanded_comp_post->functor = "**" + suffix;
+      expanded_comp_post->functor = string("**") + suffix;
       expanded_pp->components[pos] = expanded_comp_pre;
       expanded_pp->components.insert(expanded_pp->components.begin() + pos + 1,
                                      expanded_comp_post);
@@ -541,7 +546,7 @@ match_node::find_and_build (systemtap_session& s,
         {
           // We didn't find any wildcard matches (since the size of
           // the result vector didn't change).  Throw an error.
-          string sugs = suggest_functors(functor);
+          string sugs = suggest_functors(s, functor);
           throw SEMANTIC_ERROR (_F("probe point mismatch: didn't find any wildcard matches%s",
                                    sugs.empty() ? "" : (" (similar: " + sugs + ")").c_str()),
                                 comp->tok);
@@ -567,16 +572,16 @@ match_node::find_and_build (systemtap_session& s,
                 clog << _F("wildcard '%s' matched '%s'",
                            loc->components[pos]->functor.c_str(),
                            subkey.name.c_str()) << endl;
-
+              
 	      // When we have a wildcard, we need to create a copy of
 	      // the probe point.  Then we'll create a copy of the
 	      // wildcard component, and substitute the non-wildcard
 	      // functor.
 	      probe_point *non_wildcard_pp = new probe_point(*loc);
-	      non_wildcard_pp->from_glob = true;
 	      probe_point::component *non_wildcard_component
 		= new probe_point::component(*loc->components[pos]);
 	      non_wildcard_component->functor = subkey.name;
+	      non_wildcard_component->from_glob = true;
 	      non_wildcard_pp->components[pos] = non_wildcard_component;
 
               // NB: probe conditions are not attached at the wildcard
@@ -615,7 +620,7 @@ match_node::find_and_build (systemtap_session& s,
         {
 	  // We didn't find any wildcard matches (since the size of
 	  // the result vector didn't change).  Throw an error.
-          string sugs = suggest_functors(loc->components[pos]->functor);
+          string sugs = suggest_functors(s, loc->components[pos]->functor);
           throw SEMANTIC_ERROR (_F("probe point mismatch: didn't find any wildcard matches%s",
                                    sugs.empty() ? "" : (" (similar: " + sugs + ")").c_str()),
                                 loc->components[pos]->tok);
@@ -643,7 +648,7 @@ match_node::find_and_build (systemtap_session& s,
         {
           // We didn't find any alias suffixes (since the size of the
           // result vector didn't change).  Throw an error.
-          string sugs = suggest_functors(loc->components[pos]->functor);
+          string sugs = suggest_functors(s, loc->components[pos]->functor);
           throw SEMANTIC_ERROR (_F("probe point mismatch%s",
                                    sugs.empty() ? "" : (" (similar: " + sugs + ")").c_str()),
                                 loc->components[pos]->tok);
@@ -652,13 +657,20 @@ match_node::find_and_build (systemtap_session& s,
 }
 
 string
-match_node::suggest_functors(string functor)
+match_node::suggest_functors(systemtap_session& s, string functor)
 {
   // only use prefix if globby (and prefix is non-empty)
   size_t glob = functor.find('*');
   if (glob != string::npos && glob != 0)
     functor.erase(glob);
   if (functor.empty())
+    return "";
+
+  // PR18577: There isn't any point in generating a suggestion list if
+  // we're not going to display it.
+  if ((s.dump_mode == systemtap_session::dump_matched_probes
+       || s.dump_mode == systemtap_session::dump_matched_probes_vars)
+      && s.verbose < 2)
     return "";
 
   set<string> functors;
@@ -692,7 +704,7 @@ match_node::try_suffix_expansion (systemtap_session& s,
       // derived_probe_builder appears that actually takes
       // suffixes *and* consults parameters (currently no such
       // builders exist).
-      map<string, literal *> param_map;
+      literal_map_t param_map;
       // for (unsigned i=0; i<pos; i++)
       //   param_map[loc->components[i]->functor] = loc->components[i]->arg;
       // maybe 0
@@ -833,8 +845,7 @@ void
 alias_expansion_builder::build(systemtap_session & sess,
 			       probe * use,
 			       probe_point * location,
-			       std::map<std::string, literal *>
-                                 const & parameters,
+			       literal_map_t const & parameters,
 			       vector<derived_probe *> & finished_results)
 {
   vector<probe_point::component *> empty_suffix;
@@ -846,8 +857,7 @@ void
 alias_expansion_builder::build_with_suffix(systemtap_session & sess,
                                            probe * use,
                                            probe_point * location,
-                                           std::map<std::string, literal *>
-                                             const &,
+                                           literal_map_t const &,
                                            vector<derived_probe *>
                                              & finished_results,
                                            vector<probe_point::component *>
@@ -880,9 +890,6 @@ alias_expansion_builder::build_with_suffix(systemtap_session & sess,
   for (unsigned i=0; i<alias->locations.size(); i++)
     {
       probe_point *pp = new probe_point(*alias->locations[i]);
-      // if the original pp that gave rise to the alias we're building was from
-      // a globby probe, then inherit globbiness
-      pp->from_glob = location->from_glob;
       pp->components.insert(pp->components.end(), suffix.begin(), suffix.end());
       pp->condition = add_condition (pp->condition, location->condition);
       n->locations.push_back(pp);
@@ -1286,7 +1293,7 @@ struct stat_decl_collector
 	assert (e->params.size() == 0);
       }
 
-    map<string, statistic_decl>::iterator i = session.stat_decls.find(sym->name);
+    map<interned_string, statistic_decl>::iterator i = session.stat_decls.find(sym->name);
     if (i == session.stat_decls.end())
       session.stat_decls[sym->name] = new_stat;
     else
@@ -1487,6 +1494,43 @@ semantic_pass_conditions (systemtap_session & sess)
                 }
             }
         }
+    }
+
+  // PR18115: We create a begin probe which is artificially registered as
+  // affecting every other probe. This will serve as the initializer so that
+  // other probe types with false conditions can be skipped (or registered as
+  // disabled) during module initialization.
+
+  set<derived_probe*> targets;
+  for (unsigned i = 0; i < sess.probes.size(); ++i)
+    if (!vars_read_in_cond[sess.probes[i]].empty())
+      targets.insert(sess.probes[i]);
+
+  if (!targets.empty())
+    {
+      stringstream ss("probe begin {}");
+
+      // no good token to choose here... let's just use the condition expression
+      // of one of the probes as the token
+      const token *tok = (*targets.begin())->sole_location()->condition->tok;
+
+      probe *p = parse_synthetic_probe(sess, ss, tok);
+      if (!p)
+        throw SEMANTIC_ERROR (_("can't create cond initializer probe"), tok);
+
+      vector<derived_probe*> dps;
+      derive_probes(sess, p, dps);
+
+      // there should only be one
+      assert(dps.size() == 1);
+
+      derived_probe* dp = dps[0];
+      dp->probes_with_affected_conditions.insert(targets.begin(),
+                                                 targets.end());
+      sess.probes.push_back (dp);
+      dp->join_group (sess);
+
+      // no need to manually do symresolution since body is empty
     }
 
   return sess.num_errors();
@@ -1923,7 +1967,7 @@ void add_global_var_display (systemtap_session& s)
       code << "printf (\"" << format << "\"";
 
       // Feed indexes to the printf, and include them in the value
-      string value = !foreach_value.empty() ? foreach_value : l->name;
+      string value = !foreach_value.empty() ? foreach_value : (string)l->name;
       if (!l->index_types.empty())
 	{
 	  code << "," << indexes;
@@ -2259,7 +2303,7 @@ symresolution_info::visit_functioncall (functioncall* e)
 /*find_var will return an argument other than zero if the name matches the var
  * name ie, if the current local name matches the name passed to find_var*/
 vardecl*
-symresolution_info::find_var (const string& name, int arity, const token* tok)
+symresolution_info::find_var (interned_string name, int arity, const token* tok)
 {
   if (current_function || current_probe)
     {
@@ -3003,7 +3047,8 @@ void semantic_pass_opt4 (systemtap_session& s, bool& relaxed_p)
       duv.replace (p->body, true);
       if (p->body == 0)
         {
-          if (! s.timing) // PR10070
+          if (! s.timing && // PR10070
+              !(p->base->tok->location.file->synthetic)) // don't warn for synthetic probes
             s.print_warning (_F("side-effect-free probe '%s'", p->name.c_str()), p->tok);
 
           p->body = new null_statement(p->tok);
@@ -3667,7 +3712,7 @@ const_folder::visit_binary_expression (binary_expression* e)
         value = (left->value == LLONG_MIN && right->value == -1) ? 0 :
                 left->value % right->value;
       else
-        throw SEMANTIC_ERROR (_("unsupported binary operator ") + e->op);
+        throw SEMANTIC_ERROR (_("unsupported binary operator ") + (string)e->op);
     }
 
   else if ((left && ((left->value == 0 && (e->op == "*" || e->op == "&" ||
@@ -3685,6 +3730,19 @@ const_folder::visit_binary_expression (binary_expression* e)
         {
           provide (e);
           return;
+        }
+
+      // we'll pass on type=pe_long inference to the expression
+      if (other->type == pe_unknown)
+        other->type = pe_long;
+      else if (other->type != pe_long)
+        {
+          // this mismatch was not caught in the initial type resolution pass,
+          // generate a mismatch (left doesn't match right) error
+          typeresolution_info ti(session);
+          ti.assert_resolvability = true; // need this to get it throw errors
+          ti.mismatch_complexity = 1; // also needed to throw errors
+          ti.mismatch(e);
         }
 
       if (left)
@@ -3710,7 +3768,21 @@ const_folder::visit_binary_expression (binary_expression* e)
         clog << _("Collapsing constant-identity binary operator ") << *e->tok << endl;
       relaxed_p = false;
 
-      provide (left ? e->right : e->left);
+      // we'll pass on type=pe_long inference to the expression
+      expression* other = left ? e->right : e->left;
+      if (other->type == pe_unknown)
+        other->type = pe_long;
+      else if (other->type != pe_long)
+        {
+          // this mismatch was not caught in the initial type resolution pass,
+          // generate a mismatch (left doesn't match right) error
+          typeresolution_info ti(session);
+          ti.assert_resolvability = true; // need this to get it throw errors
+          ti.mismatch_complexity = 1; // also needed to throw errors
+          ti.mismatch(e);
+        }
+
+      provide (other);
       return;
     }
 
@@ -3753,7 +3825,7 @@ const_folder::visit_unary_expression (unary_expression* e)
       else if (e->op == "~")
         n->value = ~n->value;
       else
-        throw SEMANTIC_ERROR (_("unsupported unary operator ") + e->op);
+        throw SEMANTIC_ERROR (_("unsupported unary operator ") + (string)e->op);
       n->visit (this);
     }
 }
@@ -3922,7 +3994,7 @@ const_folder::visit_comparison (comparison* e)
   else if (e->op == ">=")
     value = comp >= 0;
   else
-    throw SEMANTIC_ERROR (_("unsupported comparison operator ") + e->op);
+    throw SEMANTIC_ERROR (_("unsupported comparison operator ") + (string)e->op);
 
   literal_number* n = new literal_number(value);
   n->tok = e->tok;
@@ -3943,7 +4015,7 @@ const_folder::visit_concatenation (concatenation* e)
 
       literal_string* n = new literal_string (*left);
       n->tok = e->tok;
-      n->value.append(right->value);
+      n->value = (string)n->value + (string)right->value;
       n->visit (this);
     }
   else if ((left && left->value.empty()) ||
@@ -4013,10 +4085,22 @@ const_folder::visit_target_symbol (target_symbol* e)
     update_visitor::visit_target_symbol (e);
 }
 
-static void semantic_pass_const_fold (systemtap_session& s, bool& relaxed_p)
+static int initial_typeres_pass(systemtap_session& s);
+static int semantic_pass_const_fold (systemtap_session& s, bool& relaxed_p)
 {
-  // Let's simplify statements with constant values.
+  // attempt an initial type resolution pass to see if there are any type
+  // mismatches before we starting whisking away vars that get switched out
+  // with a const.
 
+  // return if the initial type resolution pass reported errors (type mismatches)
+  int rc = initial_typeres_pass(s);
+  if (rc)
+    {
+      relaxed_p = true;
+      return rc;
+    }
+
+  // Let's simplify statements with constant values.
   const_folder cf (s, relaxed_p);
   // This instance may be reused for multiple probe/function body trims.
 
@@ -4025,6 +4109,7 @@ static void semantic_pass_const_fold (systemtap_session& s, bool& relaxed_p)
   for (map<string,functiondecl*>::iterator it = s.functions.begin();
        it != s.functions.end(); it++)
     cf.replace (it->second->body);
+  return 0;
 }
 
 
@@ -4179,6 +4264,360 @@ void semantic_pass_opt6 (systemtap_session& s, bool& relaxed_p)
     }
 }
 
+struct stable_analysis: public embedded_tags_visitor
+{
+  bool stable;
+  stable_analysis(): embedded_tags_visitor(true), stable(false) {};
+
+  void visit_embeddedcode (embeddedcode* s);
+  void visit_functioncall (functioncall* e);
+};
+
+void stable_analysis::visit_embeddedcode (embeddedcode* s)
+{
+  embedded_tags_visitor::visit_embeddedcode(s);
+  if (tagged_p("/* stable */"))
+    stable = true;
+  if (stable && !tagged_p("/* pure */"))
+    throw SEMANTIC_ERROR(_("stable function must also be /* pure */"),
+        s->tok);
+}
+
+void stable_analysis::visit_functioncall (functioncall* e)
+{
+}
+
+// Examines entire subtree for any stable functioncalls.
+struct stable_finder: public traversing_visitor
+{
+  bool stable;
+  set<string>& stable_fcs;
+  stable_finder(set<string>&s): stable(false), stable_fcs(s) {};
+  void visit_functioncall (functioncall* e);
+};
+
+void stable_finder::visit_functioncall (functioncall* e)
+{
+  if (stable_fcs.find(e->function) != stable_fcs.end())
+    stable = true;
+  traversing_visitor::visit_functioncall(e);
+}
+
+// Examines current level of block for stable functioncalls.
+// Does not descend into sublevels.
+struct level_check: public traversing_visitor
+{
+  bool stable;
+  set<string>& stable_fcs;
+  level_check(set<string>& s): stable(false), stable_fcs(s) {};
+
+  void visit_block (block* s);
+  void visit_try_block (try_block *s);
+  void visit_if_statement (if_statement* s);
+  void visit_for_loop (for_loop* s);
+  void visit_foreach_loop (foreach_loop* s);
+  void visit_functioncall (functioncall* s);
+};
+
+void level_check::visit_block (block* s)
+{
+}
+
+void level_check::visit_try_block (try_block* s)
+{
+  if (s->catch_error_var)
+    s->catch_error_var->visit(this);
+}
+
+void level_check::visit_if_statement (if_statement* s)
+{
+  s->condition->visit(this);
+}
+
+void level_check::visit_for_loop (for_loop* s)
+{
+  if (s->init) s->init->visit(this);
+  s->cond->visit(this);
+  if (s->incr) s->incr->visit(this);
+}
+
+void level_check::visit_foreach_loop (foreach_loop* s)
+{
+  s->base->visit(this);
+
+  for (unsigned i=0; i<s->indexes.size(); i++)
+    s->indexes[i]->visit(this);
+
+  if (s->value)
+    s->value->visit(this);
+
+  if (s->limit)
+    s->limit->visit(this);
+}
+
+void level_check::visit_functioncall (functioncall* e)
+{
+  if (stable_fcs.find(e->function) != stable_fcs.end())
+    stable = true;
+  traversing_visitor::visit_functioncall(e);
+}
+
+struct stable_functioncall_visitor: public update_visitor
+{
+  systemtap_session& session;
+  functiondecl* current_function;
+  derived_probe* current_probe;
+  set<string>& stable_fcs;
+  set<string> scope_vars;
+  map<string,vardecl*> new_vars;
+  vector<pair<expr_statement*,block*> > new_stmts;
+  unsigned loop_depth;
+  block* top_scope;
+  block* curr_scope;
+  stable_functioncall_visitor(systemtap_session& s, set<string>& sfc):
+    session(s), current_function(0), current_probe(0), stable_fcs(sfc),
+    loop_depth(0), top_scope(0) {};
+
+  statement* convert_stmt(statement* s);
+  void visit_block (block* s);
+  void visit_try_block (try_block* s);
+  void visit_if_statement (if_statement* s);
+  void visit_for_loop (for_loop* s);
+  void visit_foreach_loop (foreach_loop* s);
+  void visit_functioncall (functioncall* e);
+};
+
+statement* stable_functioncall_visitor::convert_stmt (statement* s)
+{
+  if (top_scope == 0 &&
+     (dynamic_cast<for_loop*>(s) || dynamic_cast<foreach_loop*>(s)))
+    {
+      stable_finder sf(stable_fcs);
+      s->visit(&sf);
+      if (sf.stable)
+        {
+          block* b = new block;
+          b->tok = s->tok;
+          b->statements.push_back(s);
+          return b;
+        }
+    }
+  else if (top_scope == 0 && !dynamic_cast<block*>(s))
+    {
+      level_check lc(stable_fcs);
+      s->visit(&lc);
+      if (lc.stable)
+        {
+          block* b = new block;
+          b->tok = s->tok;
+          b->statements.push_back(s);
+          return b;
+        }
+    }
+
+  return s;
+}
+
+void stable_functioncall_visitor::visit_block (block* s)
+{
+  block* prev_top_scope = top_scope;
+  block* prev_scope = curr_scope;
+  if (loop_depth == 0)
+    top_scope = s;
+  curr_scope = s;
+  set<string> current_vars = scope_vars;
+
+  update_visitor::visit_block(s);
+
+  if (loop_depth == 0)
+    top_scope = prev_top_scope;
+  curr_scope = prev_scope;
+  scope_vars = current_vars;
+}
+
+void stable_functioncall_visitor::visit_try_block (try_block* s)
+{
+  if (s->try_block)
+    s->try_block = convert_stmt(s->try_block);
+  replace(s->try_block);
+  replace(s->catch_error_var);
+  if (s->catch_block)
+    s->catch_block = convert_stmt(s->catch_block);
+  replace(s->catch_block);
+  provide(s);
+}
+
+void stable_functioncall_visitor::visit_if_statement (if_statement* s)
+{
+  block* prev_top_scope = top_scope;
+
+  if (loop_depth == 0)
+    top_scope = 0;
+  replace(s->condition);
+  s->thenblock = convert_stmt(s->thenblock);
+  replace(s->thenblock);
+  if (loop_depth == 0)
+    top_scope = 0;
+  if (s->elseblock)
+    s->elseblock = convert_stmt(s->elseblock);
+  replace(s->elseblock);
+  provide(s);
+
+  top_scope = prev_top_scope;
+}
+
+void stable_functioncall_visitor::visit_for_loop (for_loop* s)
+{
+  replace(s->init);
+  replace(s->cond);
+  replace(s->incr);
+  loop_depth++;
+  s->block = convert_stmt(s->block);
+  replace(s->block);
+  loop_depth--;
+  provide(s);
+}
+
+void stable_functioncall_visitor::visit_foreach_loop (foreach_loop* s)
+{
+  for (unsigned i = 0; i < s->indexes.size(); ++i)
+    replace(s->indexes[i]);
+  replace(s->base);
+  replace(s->value);
+  replace(s->limit);
+  loop_depth++;
+  s->block = convert_stmt(s->block);
+  replace(s->block);
+  loop_depth--;
+  provide(s);
+}
+
+void stable_functioncall_visitor::visit_functioncall (functioncall* e)
+{
+  for (unsigned i = 0; i < e->args.size(); ++i)
+    replace (e->args[i]);
+
+  if (stable_fcs.find(e->function) != stable_fcs.end())
+    {
+      string name("__stable_");
+      name.append(e->function).append("_value");
+
+      // Variable potentially not in scope since it is in a sibling block
+      if (scope_vars.find(e->function) == scope_vars.end())
+        {
+          if (new_vars.find(e->function) == new_vars.end())
+            {
+              // New variable declaration to store result of function call
+              vardecl* v = new vardecl;
+              v->name = name;
+              v->tok = e->tok;
+              v->set_arity(0, e->tok);
+              v->type = e->type;
+              if (current_function)
+                current_function->locals.push_back(v);
+              else
+                current_probe->locals.push_back(v);
+              new_vars[e->function] = v;
+            }
+
+          symbol* sym = new symbol;
+          sym->name = name;
+          sym->tok = e->tok;
+          sym->referent = new_vars[e->function];
+          sym->type = e->type;
+
+          functioncall* fc = new functioncall;
+          fc->tok = e->tok;
+          fc->function = e->function;
+          fc->referent = e->referent;
+          fc->type = e->type;
+
+          assignment* a = new assignment;
+          a->tok = e->tok;
+          a->op = "=";
+          a->left = sym;
+          a->right = fc;
+          a->type = e->type;
+
+          expr_statement* es = new expr_statement;
+          es->tok = e->tok;
+          es->value = a;
+
+          // Store location of the block to put new declaration.
+          if (loop_depth != 0)
+            {
+              assert(top_scope);
+              new_stmts.push_back(make_pair(es,top_scope));
+            }
+          else 
+            {
+              assert(curr_scope);
+              new_stmts.push_back(make_pair(es,curr_scope));
+            }
+
+          scope_vars.insert(e->function);
+
+          provide(sym);
+        }
+      else
+        {
+          symbol* sym = new symbol;
+          sym->name = name;
+          sym->tok = e->tok;
+          sym->referent = new_vars[e->function];
+          sym->type = e->type;
+          provide(sym);
+        }
+      return;
+    }
+
+  provide(e);
+}
+
+// Cache stable embedded-c functioncall results and replace
+// all calls with same name using that value to reduce duplicate
+// functioncall overhead. Functioncalls are pulled out of any
+// top-level loops and put into if/try blocks.
+void semantic_pass_opt7(systemtap_session& s)
+{
+  set<string> stable_fcs;
+  for (map<string,functiondecl*>::iterator it = s.functions.begin();
+       it != s.functions.end(); ++it)
+    {
+      functiondecl* fn = (*it).second;
+      stable_analysis sa;
+      fn->body->visit(&sa);
+      if (sa.stable)
+        stable_fcs.insert(fn->name);
+    }
+
+  for (vector<derived_probe*>::iterator it = s.probes.begin();
+       it != s.probes.end(); ++it)
+    {
+      stable_functioncall_visitor t(s, stable_fcs);
+      t.current_probe = *it;
+      (*it)->body = t.convert_stmt((*it)->body);
+      t.replace((*it)->body);
+
+      for (vector<pair<expr_statement*,block*> >::iterator st = t.new_stmts.begin();
+           st != t.new_stmts.end(); ++st)
+        st->second->statements.insert(st->second->statements.begin(), st->first);
+    }
+
+  for (map<string,functiondecl*>::iterator it = s.functions.begin();
+       it != s.functions.end(); ++it)
+    {
+      functiondecl* fn = (*it).second;
+      stable_functioncall_visitor t(s, stable_fcs);
+      t.current_function = fn;
+      fn->body = t.convert_stmt(fn->body);
+      t.replace(fn->body);
+
+      for (vector<pair<expr_statement*,block*> >::iterator st = t.new_stmts.begin();
+           st != t.new_stmts.end(); ++st)
+        st->second->statements.insert(st->second->statements.begin(), st->first);
+    }
+}
 
 static int
 semantic_pass_optimize1 (systemtap_session& s)
@@ -4223,7 +4662,8 @@ semantic_pass_optimize1 (systemtap_session& s)
       // that @defined expressions can be properly resolved.  PR11360
       // We also want it in case variables are used in if/case expressions,
       // so enable always.  PR11366
-      semantic_pass_const_fold (s, relaxed_p);
+      // rc is incremented if there is an error that got reported.
+      rc += semantic_pass_const_fold (s, relaxed_p);
 
       if (!s.unoptimized)
         semantic_pass_dead_control (s, relaxed_p);
@@ -4267,6 +4707,9 @@ semantic_pass_optimize2 (systemtap_session& s)
 
       iterations++;
     }
+
+  if (!s.unoptimized)
+    semantic_pass_opt7(s);
 
   return rc;
 }
@@ -4359,6 +4802,97 @@ struct autocast_expanding_visitor: public var_expanding_visitor
     }
 };
 
+
+struct initial_typeresolution_info : public typeresolution_info
+{
+  initial_typeresolution_info (systemtap_session& s): typeresolution_info(s)
+  {}
+
+  // these expressions are not supposed to make its way to the typeresolution
+  // pass. they probably get substituted/replaced, but since this is an initial pass
+  // and not all substitutions are done, replace the functions that throw errors.
+  void visit_target_symbol (target_symbol* e) {}
+  void visit_atvar_op (atvar_op* e) {}
+  void visit_defined_op (defined_op* e) {}
+  void visit_entry_op (entry_op* e) {}
+  void visit_cast_op (cast_op* e) {}
+};
+
+static int initial_typeres_pass(systemtap_session& s)
+{
+  // minimal type resolution based off of semantic_pass_types(), without
+  // checking for complete type resolutions or autocast expanding
+  initial_typeresolution_info ti(s);
+
+  // Globals never have detailed types.
+  // If we null them now, then all remaining vardecls can be detailed.
+  for (unsigned j=0; j<s.globals.size(); j++)
+    {
+      vardecl* gd = s.globals[j];
+      if (!gd->type_details)
+        gd->type_details = ti.null_type;
+    }
+
+  ti.assert_resolvability = false;
+  while (1)
+    {
+      assert_no_interrupts();
+
+      ti.num_newly_resolved = 0;
+      ti.num_still_unresolved = 0;
+      ti.num_available_autocasts = 0;
+
+      for (map<string,functiondecl*>::iterator it = s.functions.begin();
+                                               it != s.functions.end(); it++)
+        {
+          assert_no_interrupts();
+
+          functiondecl* fd = it->second;
+          ti.current_probe = 0;
+          ti.current_function = fd;
+          ti.t = pe_unknown;
+          fd->body->visit (& ti);
+        }
+
+      for (unsigned j=0; j<s.probes.size(); j++)
+        {
+          assert_no_interrupts();
+
+          derived_probe* pn = s.probes[j];
+          ti.current_function = 0;
+          ti.current_probe = pn;
+          ti.t = pe_unknown;
+          pn->body->visit (& ti);
+
+          probe_point* pp = pn->sole_location();
+          if (pp->condition)
+            {
+              ti.current_function = 0;
+              ti.current_probe = 0;
+              ti.t = pe_long; // NB: expected type
+              pp->condition->visit (& ti);
+            }
+        }
+      if (ti.num_newly_resolved == 0) // converged
+        {
+          // take into account that if there are mismatches, we'd want to know
+          // about them incase they get whisked away, later in this process
+          if (!ti.assert_resolvability && ti.mismatch_complexity > 0) // found a mismatch!!
+            {
+              ti.assert_resolvability = true; // report errors
+              if (s.verbose > 0)
+                ti.mismatch_complexity = 1; // print out mismatched but not unresolved type mismatches
+            }
+          else
+            break;
+        }
+      else
+        ti.mismatch_complexity = 0;
+    }
+
+  return s.num_errors();
+}
+
 static int
 semantic_pass_types (systemtap_session& s)
 {
@@ -4378,7 +4912,6 @@ semantic_pass_types (systemtap_session& s)
     }
 
   ti.assert_resolvability = false;
-  // XXX: maybe convert to exception-based error signalling
   while (1)
     {
       assert_no_interrupts();
@@ -4390,62 +4923,74 @@ semantic_pass_types (systemtap_session& s)
 
       for (map<string,functiondecl*>::iterator it = s.functions.begin();
                                                it != s.functions.end(); it++)
-        {
-          assert_no_interrupts();
-
-          functiondecl* fd = it->second;
-          ti.current_probe = 0;
-          ti.current_function = fd;
-          ti.t = pe_unknown;
-          fd->body->visit (& ti);
-	  // NB: we don't have to assert a known type for
-	  // functions here, to permit a "void" function.
-	  // The translator phase will omit the "retvalue".
-	  //
-          // if (fd->type == pe_unknown)
-          //   ti.unresolved (fd->tok);
-          for (unsigned i=0; i < fd->locals.size(); ++i)
-            ti.check_local (fd->locals[i]);
-
-          // Check and run the autocast expanding visitor.
-          if (ti.num_available_autocasts > 0)
-            {
-              autocast_expanding_visitor aev (ti);
-              aev.replace (fd->body);
-              ti.num_available_autocasts = 0;
-            }
-        }
-
+        try
+          {
+            assert_no_interrupts();
+            
+            functiondecl* fd = it->second;
+            ti.current_probe = 0;
+            ti.current_function = fd;
+            ti.t = pe_unknown;
+            fd->body->visit (& ti);
+            // NB: we don't have to assert a known type for
+            // functions here, to permit a "void" function.
+            // The translator phase will omit the "retvalue".
+            //
+            // if (fd->type == pe_unknown)
+            //   ti.unresolved (fd->tok);
+            for (unsigned i=0; i < fd->locals.size(); ++i)
+              ti.check_local (fd->locals[i]);
+            
+            // Check and run the autocast expanding visitor.
+            if (ti.num_available_autocasts > 0)
+              {
+                autocast_expanding_visitor aev (ti);
+                aev.replace (fd->body);
+                ti.num_available_autocasts = 0;
+              }
+          }
+        catch (const semantic_error& e)
+          {
+            throw SEMANTIC_ERROR(_F("while processing function %s",
+                                    it->second->name.c_str())).set_chain(e);
+          }
+      
       for (unsigned j=0; j<s.probes.size(); j++)
-        {
-          assert_no_interrupts();
-
-          derived_probe* pn = s.probes[j];
-          ti.current_function = 0;
-          ti.current_probe = pn;
-          ti.t = pe_unknown;
-          pn->body->visit (& ti);
-          for (unsigned i=0; i < pn->locals.size(); ++i)
-            ti.check_local (pn->locals[i]);
-
-          // Check and run the autocast expanding visitor.
-          if (ti.num_available_autocasts > 0)
-            {
-              autocast_expanding_visitor aev (ti);
-              aev.replace (pn->body);
-              ti.num_available_autocasts = 0;
-            }
-
-          probe_point* pp = pn->sole_location();
-          if (pp->condition)
-            {
-              ti.current_function = 0;
-              ti.current_probe = 0;
-              ti.t = pe_long; // NB: expected type
-              pp->condition->visit (& ti);
-            }
-        }
-
+        try
+          {
+            assert_no_interrupts();
+            
+            derived_probe* pn = s.probes[j];
+            ti.current_function = 0;
+            ti.current_probe = pn;
+            ti.t = pe_unknown;
+            pn->body->visit (& ti);
+            for (unsigned i=0; i < pn->locals.size(); ++i)
+              ti.check_local (pn->locals[i]);
+            
+            // Check and run the autocast expanding visitor.
+            if (ti.num_available_autocasts > 0)
+              {
+                autocast_expanding_visitor aev (ti);
+                aev.replace (pn->body);
+                ti.num_available_autocasts = 0;
+              }
+            
+            probe_point* pp = pn->sole_location();
+            if (pp->condition)
+              {
+                ti.current_function = 0;
+                ti.current_probe = 0;
+                ti.t = pe_long; // NB: expected type
+                pp->condition->visit (& ti);
+              }
+          }
+        catch (const semantic_error& e)
+          {
+            throw SEMANTIC_ERROR(_F("while processing probe %s",
+                                    s.probes[j]->derived_locations(false).c_str())).set_chain(e);
+          }
+  
       for (unsigned j=0; j<s.globals.size(); j++)
         {
           vardecl* gd = s.globals[j];
@@ -4453,7 +4998,7 @@ semantic_pass_types (systemtap_session& s)
             ti.unresolved (gd->tok);
           if(gd->arity == 0 && gd->wrap == true)
             {
-              throw SEMANTIC_ERROR (_("wrapping not supported for scalars"), gd->tok);
+              throw SEMANTIC_ERROR(_("wrapping not supported for scalars"), gd->tok);
             }
         }
 
@@ -4490,6 +5035,7 @@ struct exp_type_null : public exp_type_details
 
 typeresolution_info::typeresolution_info (systemtap_session& s):
   session(s), num_newly_resolved(0), num_still_unresolved(0),
+  num_available_autocasts(0),
   assert_resolvability(false), mismatch_complexity(0),
   current_function(0), current_probe(0), t(pe_unknown),
   null_type(new exp_type_null())
@@ -4706,7 +5252,7 @@ typeresolution_info::visit_assignment (assignment *e)
         }
     }
   else
-    throw SEMANTIC_ERROR (_("unsupported assignment operator ") + e->op);
+    throw SEMANTIC_ERROR (_("unsupported assignment operator ") + (string)e->op);
 }
 
 

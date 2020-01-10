@@ -155,8 +155,9 @@ Guru mode.  Enable parsing of unsafe expert-level constructs like
 embedded C.
 .TP
 .B \-P
-Prologue-searching mode.  Activate heuristics to work around incorrect
-debugging information for function parameter $context variables.
+Prologue-searching mode.  This is equivalent to \-\-prologue\-searching=always.
+Activate heuristics to work around incorrect debugging information for
+function parameter $context variables.
 .TP
 .B \-u
 Unoptimized mode.  Disable unused code elision and many other optimizations
@@ -171,7 +172,7 @@ Treat all warnings as errors.
 .BI \-b
 Use bulk mode (percpu files) for kernel-to-user data transfer.  Use the
 .IR stap\-merge
-program to multplex them back together later.
+program to multiplex them back together later.
 .TP
 .B \-t
 Collect timing information on the number of times probe executes
@@ -293,6 +294,13 @@ output files exceed
 .B \-\-skip\-badvars
 Ignore unresolvable or run-time-inaccessible context variables and
 substitute with 0, without errors.
+
+.TP
+\fB\-\-prologue\-searching\fR[=\fIWHEN\fR]
+Prologue-searching mode. Activate heuristics to work around incorrect debugging
+information  for  function  parameter $context variables. WHEN can be either
+"never", "always", or "auto" (i.e. enabled by heuristic). If WHEN is missing,
+then "always" is assumed. If the option is missing, then "auto" is assumed.
 
 .TP
 .B \-\-suppress\-handler\-errors
@@ -696,6 +704,13 @@ Shorthand for \fI\-\-runtime=dyninst\fR.
 On machines that require SystemTap to build its own uprobes module (kernels
 prior to version 3.5), this option instructs SystemTap to also save a copy of
 the module in the current directory (creating a new "uprobes" directory first).
+
+.TP
+.BI \-\-target-namespaces "=PID"
+Allow for a set of target namespaces to be set based on the namespaces the
+given PID is in. This is for namespace\-aware tapset functions. If the target
+namespaces was not set, the target defaults to the stap process'
+namespaces.
 
 .SH ARGUMENTS
 
@@ -1240,7 +1255,7 @@ there constitute mere initialization, not a macro substitution.
 An alias is used just like a built-in probe type.
 .SAMPLE
 probe syscall.read {
-  printf("reading fd=%d\n", fildes)
+  printf("reading fd=%d\\n", fildes)
   if (fildes > 10) tracethis = 1
 }
 .ESAMPLE
@@ -1539,10 +1554,12 @@ are made available to it using macros
 .IR STAP_ARG_*
 and
 .IR STAP_RETVALUE .
-Errors may be signalled with STAP_ERROR.  The function may return
-early with STAP_RETURN.  Here are some examples:
+Errors may be signalled with STAP_ERROR. Output may be written with
+STAP_PRINTF. The function may return early with STAP_RETURN.
+Here are some examples:
 .SAMPLE
 function integer_ops (val) %{
+  STAP_PRINTF("%d\\n", STAP_ARG_val);
   STAP_RETVALUE = STAP_ARG_val + 1;
   if (STAP_RETVALUE == 4)
       STAP_ERROR("wrong guess: %d", (int) STAP_RETVALUE);
@@ -1587,6 +1604,12 @@ and safety properties.
 .I /* pure */
 means that the C code has no side effects and may be elided entirely if its
 value is not used by script code.
+.TP
+.I /* stable */
+means that the C code always has the same value (in any given probe handler
+invocation), so repeated calls may be automatically replaced by memoized
+values.  Such functions must take no parameters, and also be
+.IR pure .
 .TP
 .I /* unprivileged */
 means that the C code is so safe that even unprivileged users are permitted
@@ -1768,7 +1791,7 @@ will be created with the interval set to 300 s.
 .SH SAFETY AND SECURITY
 
 .PP
-Systemtap is may be used as a poweful administrative tool.  It can
+Systemtap is may be used as a powerful administrative tool.  It can
 expose kernel internal data structures and potentially private user
 information.  (In
 .BR dyninst
@@ -2243,6 +2266,7 @@ stappaths (7) manual page.
 .IR stapex (3stap),
 .IR stap\-server (8),
 .IR stap\-prep (1),
+.IR stapref (1),
 .IR awk (1),
 .IR gdb (1)
 

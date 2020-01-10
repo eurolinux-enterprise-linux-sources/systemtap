@@ -1,7 +1,7 @@
 dnl configure.ac --- autoconf input file for systemtap
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([systemtap], 2.7, systemtap@sourceware.org, systemtap)
+AC_INIT([systemtap], 2.9, systemtap@sourceware.org, systemtap)
 dnl                  ^^^ see also NEWS, systemtap.spec, testsuite/configure.ac
 dnl                      doc/SystemTap_Beginners_Guide/en-US/Book_Info.xml
 
@@ -35,7 +35,7 @@ AC_SYS_LARGEFILE
 AC_CHECK_FUNCS(ppoll)
 AC_CHECK_FUNCS(openat)
 AM_GNU_GETTEXT(external)
-AM_GNU_GETTEXT_VERSION([0.18.2])
+AM_GNU_GETTEXT_VERSION([0.19.4])
 
 if test "x$GMSGFMT" = "x:"; then
    AC_MSG_ERROR([missing gnu /usr/bin/msgfmt])
@@ -200,8 +200,6 @@ AC_ARG_ENABLE([docs],
     [enable building documentation (default on if latex etc. found).]),
   [enable_docs=$enableval],
   [enable_docs="check"])
-AC_CHECK_PROG(have_xvfb, xvfb-run, yes, no)
-AM_CONDITIONAL([HAVE_XVFB], [test "$have_xvfb" == "yes"])
 AC_CHECK_PROG(have_latex, latex, yes, no)
 AC_CHECK_PROG(have_dvips, dvips, yes, no)
 AC_CHECK_PROG(have_ps2pdf, ps2pdf, yes, no)
@@ -219,34 +217,6 @@ if test "x${have_latex}${have_dvips}${have_ps2pdf}${have_latex2html}" == "xyesye
 fi
 AM_CONDITIONAL([BUILD_DOCS], [test "$building_docs" == "yes"])
 
-dnl Handle the options to build the publican options
-building_publican="no"
-AC_ARG_ENABLE([publican],
-  AS_HELP_STRING([--enable-publican],
-    [enable building publican documentation guides (default on if publican found and other documentation built).]),
-  [enable_publican=$enableval],
-  [enable_publican="check"])
-if test "$building_docs" == "no" -a "$enable_publican" == "yes" ; then
-   AC_MSG_ERROR([must use --enable-docs with --enable-publican])
-fi
-AC_CHECK_PROG(have_publican, publican, yes, no)
-if test "$enable_publican" == "yes"; then
-   if test "x${have_publican}" != "xyes"; then
-      AC_MSG_ERROR([cannot find publican for building publican guides])
-   fi
-fi
-if test "x${have_publican}" == "xyes" -a "$enable_publican" != "no" -a "${building_docs}" == "yes"; then
-   building_publican="yes"
-fi
-AM_CONDITIONAL([BUILD_PUBLICAN], [test "$building_publican" == "yes"])
-publican_brand="common"
-AC_ARG_WITH([publican-brand],
-  AS_HELP_STRING([--with-publican-brand=BRAND],
-    [building publican documentation guides using given brand (defaults to "common").]),
-  [publican_brand=$withval],
-  [publican_brand="common"])
-PUBLICAN_BRAND=$publican_brand
-AC_SUBST(PUBLICAN_BRAND)
 
 dnl Handle the option to build the reference documentation
 building_refdocs="no"
@@ -283,6 +253,7 @@ if test "x${have_fop}" == "xyes"; then
    rm -f dummy-tapsets.pdf
 fi
 AM_CONDITIONAL([HAVE_FOP], [test "$have_fop" == "yes"])
+AM_CONDITIONAL([HAVE_XMLTO], [test "$have_xmlto" == "yes"])
 
 dnl There is a strange bug in older versions of xmlto when generating pdf.
 dnl https://bugzilla.redhat.com/show_bug.cgi?id=526273
@@ -353,6 +324,17 @@ AS_IF([test "x$with_nss" != "xno"], [
 
 AM_CONDITIONAL([HAVE_NSS], [test "${have_nss}" = "yes"])
 
+dnl Handle dracut directory configuration.  Note we hard-code /usr by default,
+dnl instead of $prefix, because dracut is a system service that doesn't listen
+dnl at relocatable directories.
+AC_ARG_WITH([dracutstap],
+  AS_HELP_STRING([--with-dracutstap=DIR],
+    [Install dracut module files in DIR]))
+AS_IF([test "x$with_dracutstap" != "x"],[dracutstap="$with_dracutstap"],
+            [dracutstap=/usr/lib/dracut/modules.d/99stap])
+AC_MSG_NOTICE([using dracut module directory $dracutstap])
+AC_SUBST(dracutstap)
+
 dnl Handle the option to build the compile server.
 AC_ARG_ENABLE([server],
   AS_HELP_STRING([--enable-server],
@@ -413,6 +395,13 @@ if test "$with_rpm" != "no"; then
 fi
 
 
+dnl Allow user to choose python3 for /usr/bin/dtrace
+AC_ARG_WITH([python3],
+  AS_HELP_STRING([--with-python3],[prefer /usr/bin/python3]))
+AS_IF([test "x$with_python3" = "xyes"],
+      [AC_SUBST(python,[python3])],
+      [AC_SUBST(python,[python])])
+      
 dnl Handle elfutils.  If '--with-elfutils=DIR' wasn't specified, used
 dnl the system's elfutils.
 build_elfutils=no
@@ -488,6 +477,7 @@ AC_LANG_PUSH(C++)
 AC_CHECK_HEADERS([tr1/unordered_map])
 AC_CHECK_HEADERS([tr1/memory])
 AC_CHECK_HEADERS([boost/shared_ptr.hpp])
+AC_CHECK_HEADERS([boost/utility/string_ref.hpp])
 AC_LANG_POP(C++)
 
 
@@ -695,6 +685,12 @@ AS_IF([test "x$with_extra_version" != "xno"], [
 AC_DEFINE_UNQUOTED(STAP_EXTRA_VERSION, "$stap_extra_version", [extra stap version code])
 AC_SUBST(STAP_EXTRA_VERSION, "$stap_extra_version")
 
+dnl The stap translator stringtable benefits performance-wise from c++11 constructs.
+AX_CHECK_COMPILE_FLAG([-std=c++11],[cxx11="-std=c++11"],[cxx11=""])
+AS_IF([test "x$cxx11" != "x"],[
+        AC_MSG_NOTICE([Compiling parts of systemtap with -std=c++11])])
+AC_SUBST(cxx11)
+
 dnl This is here mainly to make sure that configure --prefix=... changes
 dnl the config.h files so files depending on it are recompiled
 dnl prefix is passed through indirectly in the Makefile.am AM_CPPFLAGS.
@@ -727,11 +723,10 @@ AC_CONFIG_FILES([staprun/guest/stapshd], [chmod +x staprun/guest/stapshd])
 AC_CONFIG_FILES([staprun/guest/stapsh-daemon], [chmod +x staprun/guest/stapsh-daemon])
 AC_CONFIG_FILES([staprun/guest/stapsh@.service])
 
-# Setup "shadow" directory doc/beginners that has everything setup for
-# publican in one directory (through directory links if necessary).
+# Setup "shadow" directory doc/beginners that has the basic directories  setup for
+# xmlto in one directory (through directory links if necessary).
 # It would be nice to use AC_CONFIG_LINKS, but automake complains when
 # the src is a directory and not a file.
-AC_CONFIG_FILES([doc/beginners/publican.cfg:doc/SystemTap_Beginners_Guide/publican.cfg.in])
 AC_CONFIG_COMMANDS([doc/beginners],
                    [rm -f $ac_abs_top_builddir/doc/beginners/en-US $ac_abs_top_builddir/doc/beginners/build/en-US/testsuite && mkdir -p $ac_abs_top_builddir/doc/beginners/build/en-US && ln -s $ac_abs_top_srcdir/doc/SystemTap_Beginners_Guide/en-US $ac_abs_top_builddir/doc/beginners/en-US && ln -s $ac_abs_top_srcdir/testsuite $ac_abs_top_builddir/doc/beginners/build/en-US/testsuite])
 

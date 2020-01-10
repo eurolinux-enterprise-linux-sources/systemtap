@@ -87,11 +87,12 @@ subdir = doc/SystemTap_Tapset_Reference
 DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/Makefile.am \
 	$(top_srcdir)/depcomp
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/gettext.m4 \
-	$(top_srcdir)/m4/iconv.m4 $(top_srcdir)/m4/lib-ld.m4 \
-	$(top_srcdir)/m4/lib-link.m4 $(top_srcdir)/m4/lib-prefix.m4 \
-	$(top_srcdir)/m4/nls.m4 $(top_srcdir)/m4/po.m4 \
-	$(top_srcdir)/m4/progtest.m4 $(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/ax_check_compile_flag.m4 \
+	$(top_srcdir)/m4/gettext.m4 $(top_srcdir)/m4/iconv.m4 \
+	$(top_srcdir)/m4/lib-ld.m4 $(top_srcdir)/m4/lib-link.m4 \
+	$(top_srcdir)/m4/lib-prefix.m4 $(top_srcdir)/m4/nls.m4 \
+	$(top_srcdir)/m4/po.m4 $(top_srcdir)/m4/progtest.m4 \
+	$(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 mkinstalldirs = $(install_sh) -d
@@ -228,8 +229,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 POSUB = @POSUB@
-PUBLICAN_BRAND = @PUBLICAN_BRAND@
 RANLIB = @RANLIB@
+SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 STAP_EXTRA_VERSION = @STAP_EXTRA_VERSION@
@@ -260,9 +261,11 @@ build_cpu = @build_cpu@
 build_os = @build_os@
 build_vendor = @build_vendor@
 builddir = @builddir@
+cxx11 = @cxx11@
 datadir = @datadir@
 datarootdir = @datarootdir@
 docdir = @docdir@
+dracutstap = @dracutstap@
 dvidir = @dvidir@
 elfutils_abs_srcdir = @elfutils_abs_srcdir@
 exec_prefix = @exec_prefix@
@@ -273,9 +276,7 @@ have_javac = @have_javac@
 have_latex = @have_latex@
 have_latex2html = @have_latex2html@
 have_ps2pdf = @have_ps2pdf@
-have_publican = @have_publican@
 have_xmlto = @have_xmlto@
-have_xvfb = @have_xvfb@
 host = @host@
 host_alias = @host_alias@
 host_cpu = @host_cpu@
@@ -302,6 +303,7 @@ pdfdir = @pdfdir@
 prefix = @prefix@
 program_transform_name = @program_transform_name@
 psdir = @psdir@
+python = @python@
 sbindir = @sbindir@
 selinux_CFLAGS = @selinux_CFLAGS@
 selinux_LIBS = @selinux_LIBS@
@@ -335,7 +337,7 @@ HTML_INSTALL_DIR = $(DESTDIR)$(datadir)/doc/systemtap/tapsets
 #                        +--> man/      (mandocs)  [by xmlto]
 @BUILD_PDFREFDOCS_TRUE@PDFDOCS = tapsets.pdf
 @XMLTO_STRINGPARAM_TRUE@XMLTOMANPARAMS = --stringparam man.authors.section.enabled=0 --stringparam man.copyright.section.enabled=0
-@XMLTO_STRINGPARAM_TRUE@XMLTOHTMLPARAMS = --stringparam use.id.as.filename=1 --stringparam generate.toc='book\ toc,title'
+@XMLTO_STRINGPARAM_TRUE@XMLTOHTMLPARAMS = --stringparam use.id.as.filename=1 -m $(abs_srcdir)/generate-toc.xml
 @XMLTO_STRINGPARAM_TRUE@XMLTOPDFPARAMS = --stringparam refentry.generate.name=0 --stringparam refentry.generate.title=1
 @HAVE_FOP_FALSE@XMLTOPDF_FOP = 
 @HAVE_FOP_TRUE@XMLTOPDF_FOP = --with-fop
@@ -584,9 +586,10 @@ uninstall-am:
 
 @BUILD_REFDOCS_TRUE@all: $(PDFDOCS) stamp-htmldocs stamp-mandocs
 @BUILD_REFDOCS_TRUE@tapsets.xml: docproc $(shell find $(SRCTREE)/tapset -name '*.stp')
-@BUILD_REFDOCS_TRUE@	SRCTREE=$(SRCTREE) $(DOCPROC) doc $(abs_srcdir)/tapsets.tmpl > tapsets.xml.new
+@BUILD_REFDOCS_TRUE@	sed -e '/^!Syscalls/{r $(abs_srcdir)/syscalls.xmlpart' -e 'd}' $(abs_srcdir)/tapsets.tmpl > tapsets.tmpl.new
+@BUILD_REFDOCS_TRUE@	SRCTREE=$(SRCTREE) $(DOCPROC) doc tapsets.tmpl.new > tapsets.xml.new
 @BUILD_REFDOCS_TRUE@	xsltproc $(srcdir)/sort-tapsets.xslt tapsets.xml.new > tapsets.xml.new2
-@BUILD_REFDOCS_TRUE@	rm tapsets.xml.new
+@BUILD_REFDOCS_TRUE@	rm tapsets.xml.new tapsets.tmpl.new
 @BUILD_REFDOCS_TRUE@	if test -s tapsets.xml && cmp tapsets.xml.new2 tapsets.xml >/dev/null ; then \
 @BUILD_REFDOCS_TRUE@		echo tapsets.xml unchanged; \
 @BUILD_REFDOCS_TRUE@		rm tapsets.xml.new2; \
@@ -595,16 +598,17 @@ uninstall-am:
 @BUILD_REFDOCS_TRUE@	fi
 
 @BUILD_REFDOCS_TRUE@stamp-htmldocs: tapsets.xml
-@BUILD_REFDOCS_TRUE@	xmlto $(XMLTOHTMLPARAMS) html -o tapsets tapsets.xml >/dev/null 2>&1
+@BUILD_REFDOCS_TRUE@	xmlto $(XMLTOHTMLPARAMS) html -o tapsets tapsets.xml
 @BUILD_REFDOCS_TRUE@	touch stamp-htmldocs
 
 # bump up the allocated space so "xmlto pdf" works
 @BUILD_REFDOCS_TRUE@tapsets.pdf: tapsets.xml
-@BUILD_REFDOCS_TRUE@	env pool_size=6000000 hash_extra=6000000 xmlto $(XMLTOPDF_FOP) $(XMLTOPDFPARAMS) pdf tapsets.xml >/dev/null 2>&1
+@BUILD_REFDOCS_TRUE@	env pool_size=6000000 hash_extra=6000000 xmlto $(XMLTOPDF_FOP) $(XMLTOPDFPARAMS) pdf tapsets.xml
 
 @BUILD_REFDOCS_TRUE@stamp-mandocs: tapsets.xml
-@BUILD_REFDOCS_TRUE@	xmlto $(XMLTOMANPARAMS) man -o man3 tapsets.xml >/dev/null 2>&1
+@BUILD_REFDOCS_TRUE@	xmlto $(XMLTOMANPARAMS) man -o man3 tapsets.xml
 @BUILD_REFDOCS_TRUE@	SRCTREE=$(SRCTREE) $(MANPAGER) # generate tapset::* pages
+@BUILD_REFDOCS_TRUE@	cp $(abs_srcdir)/syscalls.3stap man_pages/tapset\:\:syscalls.3stap
 @BUILD_REFDOCS_TRUE@	touch stamp-mandocs
 
 #FIXME need to figure out where to install things appropriately

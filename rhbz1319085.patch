@@ -1,0 +1,57 @@
+commit bbeb74db159805d6c5a340092d8d82156f2e437c
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Fri Mar 18 11:56:01 2016 -0400
+
+    RHBZ1319085: hack for s390 udelay_simple()
+    
+    For a few brief s390 kernel builds, an exported udelay_simple()
+    is to be preferred to udelay().  Should have no impact anywhere
+    else.
+
+diff --git a/buildrun.cxx b/buildrun.cxx
+index a0890ad..e58a823 100644
+--- a/buildrun.cxx
++++ b/buildrun.cxx
+@@ -439,6 +439,9 @@ compile_pass (systemtap_session& s)
+   output_exportconf(s, o, "vzalloc_node", "STAPCONF_VZALLOC_NODE");
+   output_exportconf(s, o, "vmalloc_node", "STAPCONF_VMALLOC_NODE");
+ 
++  // RHBZ1233912 - s390 temporary workaround for non-atomic udelay()
++  output_exportconf(s, o, "udelay_simple", "STAPCONF_UDELAY_SIMPLE");
++
+   output_autoconf(s, o, "autoconf-tracepoint-strings.c", "STAPCONF_TRACEPOINT_STRINGS", NULL);
+   output_autoconf(s, o, "autoconf-timerfd.c", "STAPCONF_TIMERFD_H", NULL);
+ 
+diff --git a/runtime/linux/runtime.h b/runtime/linux/runtime.h
+index 5a4463d..dca1d1f 100644
+--- a/runtime/linux/runtime.h
++++ b/runtime/linux/runtime.h
+@@ -62,6 +62,10 @@
+ #define STP_TRANSPORT_VERSION 1
+ #endif
+ 
++#ifdef STAPCONF_UDELAY_SIMPLE
++#define udelay(x) udelay_simple(x)
++#endif
++
+ #ifndef clamp
+ #define clamp(val, low, high)     min(max(low, val), high)
+ #endif
+commit a13e956e3c21dea2256c6069ce04bfd652ebe568
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Thu Mar 24 06:23:28 2016 -0400
+
+    RHBZ1319085 cont'd: #undef delay() before redefining it
+
+diff --git a/runtime/linux/runtime.h b/runtime/linux/runtime.h
+index dca1d1f..cdde90f 100644
+--- a/runtime/linux/runtime.h
++++ b/runtime/linux/runtime.h
+@@ -63,6 +63,7 @@
+ #endif
+ 
+ #ifdef STAPCONF_UDELAY_SIMPLE
++#undef udelay
+ #define udelay(x) udelay_simple(x)
+ #endif
+ 

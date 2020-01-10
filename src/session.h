@@ -1,5 +1,5 @@
 // -*- C++ -*-
-// Copyright (C) 2005-2014 Red Hat Inc.
+// Copyright (C) 2005-2015 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -31,6 +31,7 @@ extern "C" {
 
 #include "privilege.h"
 #include "util.h"
+#include "stringtable.h"
 
 // forward decls for all referenced systemtap types
 class stap_hash;
@@ -165,9 +166,9 @@ public:
   std::string kernel_base_release;
   std::string kernel_build_tree;
   std::string kernel_source_tree;
-  std::map<std::string,std::string> kernel_config;
-  std::set<std::string> kernel_exports;
-  std::set<std::string> kernel_functions;
+  std::map<interned_string,interned_string> kernel_config;
+  std::set<interned_string> kernel_exports;
+  std::set<interned_string> kernel_functions;
   int parse_kernel_config ();
   int parse_kernel_exports ();
   int parse_kernel_functions ();
@@ -204,7 +205,6 @@ public:
   bool suppress_warnings;
   bool panic_warnings;
   int buffer_size;
-  bool prologue_searching;
   bool tapset_compile_coverage;
   bool need_uprobes;
   bool need_unwind;
@@ -237,6 +237,7 @@ public:
   bool color_errors;
 
   enum { color_never, color_auto, color_always } color_mode;
+  enum { prologue_searching_never, prologue_searching_auto, prologue_searching_always } prologue_searching_mode;
 
   enum { kernel_runtime, dyninst_runtime } runtime_mode;
   bool runtime_usermode_p() const { return runtime_mode == dyninst_runtime; }
@@ -334,12 +335,11 @@ public:
   std::vector<std::pair<std::string,std::string> > perf_counters;
   std::vector<derived_probe*> probes; // see also *_probes groups below
   std::vector<embeddedcode*> embeds;
-  std::map<std::string, statistic_decl> stat_decls;
+  std::map<interned_string, statistic_decl> stat_decls;
   // track things that are removed
   std::vector<vardecl*> unused_globals;
   std::vector<derived_probe*> unused_probes; // see also *_probes groups below
   std::vector<functiondecl*> unused_functions;
-  // XXX: vector<*> instead please?
 
   // resolved/compiled regular expressions for the run
   std::map<std::string, stapdfa*> dfas;
@@ -414,6 +414,8 @@ public:
 
   translator_output* op_create_auxiliary(bool trailer_p = false);
 
+  int target_namespaces_pid;
+
   const token* last_token;
   void print_token (std::ostream& o, const token* tok);
   void print_error (const semantic_error& e);
@@ -444,6 +446,9 @@ public:
 
   bool is_user_file (const std::string& name);
   bool is_primary_probe (derived_probe *dp);
+
+  // NB: It is very important for all of the above (and below) fields
+  // to be cleared in the systemtap_session ctor (session.cxx).
 };
 
 struct exit_exception: public std::runtime_error

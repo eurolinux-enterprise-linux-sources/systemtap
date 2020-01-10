@@ -22,7 +22,7 @@ proc grep_kallsyms { pattern } {
 proc utrace_orig_p {} {
     # We want utrace_attach (rhel5) or utrace_attach_task (rhel6), but don't
     # get confused by the private module version of any active stap module.
-    return [grep_kallsyms "T utrace_attach"]
+    return [expr [grep_kallsyms "T utrace_attach"] || [grep_kallsyms "T .utrace_attach_task"]]
 }
 
 
@@ -227,7 +227,14 @@ proc setup_systemtap_environment {} {
 
     # All hail the prophet lockdep
     set chan [open $env(SYSTEMTAP_DIR)/rc w]
-    puts $chan "--rlimit-cpu=300"
+    # 32-bit arm machines are quite slow. Let them run for longer than
+    # bigger machines, otherwise systemtap.syscall/syscall.exp (among
+    # other tests) will fail.
+    if {[string match arm* $::tcl_platform(machine)]} {
+	puts $chan "--rlimit-cpu=600"
+    } else {
+	puts $chan "--rlimit-cpu=300"
+    }
     puts $chan "-E 'probe timer.s(900){error(\"probe timeout after 15 minutes\")}'"
     close $chan
 
@@ -432,6 +439,7 @@ proc normalize_arch { arch } {
     if {$arch == "armv7l"} then {return "arm"}
     if {$arch == "armv7lh"} then {return "arm"}
     if {$arch == "aarch64"} then {return "arm64"}
+    if {$arch == "ppc64le"} then {return "powerpc"}
     return $arch
 }
 

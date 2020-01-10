@@ -146,6 +146,7 @@ set valid_pid [exp_pid -i $spawn_id]
 proc test_cleanup2 {} {
     global valid_pid
     kill -INT -$valid_pid 2
+    catch { close }; catch { wait }
 }
 
 # Returns the address to main in compiled executable using stap
@@ -335,6 +336,8 @@ proc report_untested_probes {} {
          module(string).function(string) -
          module(string).function(string).call -
          module(string).function(string).callee(string) -
+         module(string).function(string).callee(string).call -
+         module(string).function(string).callee(string).return -
          module(string).function(string).callees -
          module(string).function(string).callees(number) -
          module(string).function(string).exported -
@@ -375,6 +378,19 @@ proc report_untested_probes {} {
          {
             if {![callee_probes_p]} {
                setup_kfail CALLEE *-*-*
+            } elseif {![uprobes_p]} {
+               setup_kfail UPROBES *-*-*
+            }
+         }
+
+         process.function(string).label(string) -
+         process.library(string).function(string).label(string) -
+         process(number).function(string).label(string) -
+         process(string).function(string).label(string) -
+         process(string).library(string).function(string).label(string)
+         {
+            if {![uprobes_p]} {
+               setup_kfail UPROBES *-*-*
             }
          }
 
@@ -387,6 +403,8 @@ proc report_untested_probes {} {
          {
             if {![callee_probes_p]} {
                setup_kfail CALLEE *-*-*
+            } elseif {![uprobes_p]} {
+               setup_kfail UPROBES *-*-*
             }
          }
 
@@ -413,6 +431,8 @@ proc report_untested_probes {} {
          {
             if {![plt_probes_p]} {
                setup_kfail PLT *-*-*
+            } elseif {![uprobes_p]} {
+               setup_kfail UPROBES *-*-*
             }
          }
 
@@ -572,6 +592,16 @@ if {[callee_probes_p]} {
 
    stap_list {kernel.function("vfs_read").callee("*")} \
       {re:kernel.function\("vfs_read@[^:]+:[0-9]+"\).callee\("[^@]+@[^:]+:[0-9]+"\)} {-1}
+
+   testing_probe {kernel.function(string).callee(string).return}
+
+   stap_list {kernel.function("vfs_read").callee("*").return} \
+      {re:kernel.function\("vfs_read@[^:]+:[0-9]+"\).callee\("[^@]+@[^:]+:[0-9]+"\).return} {-1}
+
+   testing_probe {kernel.function(string).callee(string).call}
+
+   stap_list {kernel.function("vfs_read").callee("*").call} \
+      {re:kernel.function\("vfs_read@[^:]+:[0-9]+"\).callee\("[^@]+@[^:]+:[0-9]+"\).call} {-1}
 
    testing_probe {kernel.function(string).callees}
 
@@ -771,12 +801,22 @@ if {$exepath != ""} {
    stap_list_cmd "process.function(\"foo\").call" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.call"
 
-   if {[callee_probes_p]} {
+   if {[uprobes_p] && [callee_probes_p]} {
 
       testing_probe {process.function(string).callee(string)}
 
       stap_list_cmd "process.function(\"foo\").callee(\"bar\")" \
          "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)"
+
+      testing_probe {process.function(string).callee(string).call}
+
+      stap_list_cmd "process.function(\"foo\").callee(\"bar\").call" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)\\\.call"
+
+      testing_probe {process.function(string).callee(string).return}
+
+      stap_list_cmd "process.function(\"foo\").callee(\"bar\").return" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)\\\.return"
 
       testing_probe {process.function(string).callees}
 
@@ -802,19 +842,22 @@ if {$exepath != ""} {
    stap_list_cmd "process.function(\"inln\").inline" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"inln@\[^:\]+:11\"\\\)\\\.inline"
 
-   testing_probe {process.function(string).label(string)}
+   if {[uprobes_p]} {
 
-   stap_list_cmd "process.function(\"main\").label(\"main_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      testing_probe {process.function(string).label(string)}
 
-   stap_list_cmd "process.function(\"main\").label(\"main_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list_cmd "process.function(\"main\").label(\"main_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
 
-   stap_list_cmd "process.function(\"main@$test.c:33\").label(\"main_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list_cmd "process.function(\"main\").label(\"main_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
 
-   stap_list_cmd "process.function(\"main@$test.c:33\").label(\"main_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list_cmd "process.function(\"main@$test.c:33\").label(\"main_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+
+      stap_list_cmd "process.function(\"main@$test.c:33\").label(\"main_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+   }
 
    testing_probe {process.function(string).return}
 
@@ -854,12 +897,22 @@ if {$exepath != ""} {
    stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").call" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:55\"\\\)\\\.call"
 
-   if {[callee_probes_p]} {
+   if {[uprobes_p] && [callee_probes_p]} {
 
       testing_probe {process.library(string).function(string).callee(string)}
 
       stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").callee(\"libbar\")" \
          "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:55\"\\\)\\\.callee\\\(\"libbar@\[^:\]+:48\"\\\)"
+
+      testing_probe {process.library(string).function(string).callee(string).call}
+
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").callee(\"libbar\").call" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:55\"\\\)\\\.callee\\\(\"libbar@\[^:\]+:48\"\\\)\\\.call"
+
+      testing_probe {process.library(string).function(string).callee(string).return}
+
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").callee(\"libbar\").return" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:55\"\\\)\\\.callee\\\(\"libbar@\[^:\]+:48\"\\\)\\\.return"
 
       testing_probe {process.library(string).function(string).callees}
 
@@ -885,19 +938,22 @@ if {$exepath != ""} {
    stap_list_cmd_lib "process.library(\"sopath\").function(\"libinln\").inline" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libinln@\[^:\]+:43\"\\\)\\\.inline"
 
-   testing_probe {process.library(string).function(string).label(string)}
+   if {[uprobes_p]} {
 
-   stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").label(\"lib_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+      testing_probe {process.library(string).function(string).label(string)}
 
-   stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").label(\"lib_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").label(\"lib_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
 
-   stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo@$test.c:58\").label(\"lib_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo\").label(\"lib_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
 
-   stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo@$test.c:58\").label(\"lib_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo@$test.c:58\").label(\"lib_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+
+      stap_list_cmd_lib "process.library(\"sopath\").function(\"libfoo@$test.c:58\").label(\"lib_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.function\\\(\"libfoo@\[^:\]+:58\"\\\)\\\.label\\\(\"lib_label\"\\\)"
+   }
 
    testing_probe {process.library(string).function(string).return}
 
@@ -999,6 +1055,12 @@ if {$exepath != ""} {
    stap_list_cmd_lib "process.library(\"sopath\").statement(\"libfoo@$test.c+3\").nearest" \
        "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.statement\\\(\"libfoo@\[^:\]+:58\"\\\).nearest"
 
+   stap_list_cmd_lib "process.library(\"sopath\").statement(\"libfoo@$test.c:55,56\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.statement\\\(\"libfoo@\[^:\]+:5\[57\]\"\\\).nearest" {2}
+
+   stap_list_cmd_lib "process.library(\"sopath\").statement(\"libfoo@$test.c:*\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.library\\\(\"$sofullpath\"\\\)\\\.statement\\\(\"libfoo@\[^:\]+:\[0-9\]+\"\\\).nearest" {-1}
+
    testing_probe {process.mark(string)}
 
    stap_list_cmd "process.mark(\"mark\")" \
@@ -1091,6 +1153,12 @@ if {$exepath != ""} {
 
    stap_list_cmd "process.statement(\"foo@$test.c+5\").nearest" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:28\"\\\).nearest"
+
+   stap_list_cmd "process.statement(\"foo@$test.c:23,24\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:2\[35\]\"\\\).nearest" {2}
+
+   stap_list_cmd "process.statement(\"foo@$test.c:*\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:\[0-9\]+\"\\\).nearest" {-1}
 }
 
 testing_probe {process.syscall}
@@ -1154,12 +1222,22 @@ if {$exepath != ""} {
    stap_list "process($valid_pid).function(\"foo\").call" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.call"
 
-   if {[callee_probes_p]} {
+   if {[uprobes_p] && [callee_probes_p]} {
 
       testing_probe {process(number).function(string).callee(string)}
 
       stap_list "process($valid_pid).function(\"foo\").callee(\"bar\")" \
          "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)"
+
+      testing_probe {process(number).function(string).callee(string).call}
+
+      stap_list "process($valid_pid).function(\"foo\").callee(\"bar\").call" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)\\\.call"
+
+      testing_probe {process(number).function(string).callee(string).return}
+
+      stap_list "process($valid_pid).function(\"foo\").callee(\"bar\").return" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"foo@\[^:\]+:23\"\\\)\\\.callee\\\(\"bar@\[^:\]+:16\"\\\)\\\.return"
 
       testing_probe {process(number).function(string).callees}
 
@@ -1185,19 +1263,22 @@ if {$exepath != ""} {
    stap_list "process($valid_pid).function(\"inln\").inline" \
       "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"inln@\[^:\]+:11\"\\\)\\\.inline"
 
-   testing_probe {process(number).function(string).label(string)}
+   if {[uprobes_p]} {
 
-   stap_list "process($valid_pid).function(\"main\").label(\"main_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      testing_probe {process(number).function(string).label(string)}
 
-   stap_list "process($valid_pid).function(\"main\").label(\"main_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list "process($valid_pid).function(\"main\").label(\"main_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
 
-   stap_list "process($valid_pid).function(\"main@$test.c:33\").label(\"main_label\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list "process($valid_pid).function(\"main\").label(\"main_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
 
-   stap_list "process($valid_pid).function(\"main@$test.c:33\").label(\"main_labe?\")" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+      stap_list "process($valid_pid).function(\"main@$test.c:33\").label(\"main_label\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+
+      stap_list "process($valid_pid).function(\"main@$test.c:33\").label(\"main_labe?\")" \
+         "re:process\\\(\"$exefullpath\"\\\)\\\.function\\\(\"main@\[^:\]+:33\"\\\)\\\.label\\\(\"main_label\"\\\)"
+   }
 
    testing_probe {process(number).function(string).return}
 
@@ -1293,11 +1374,17 @@ if {$exepath != ""} {
 
    testing_probe {process(number).statement(string).nearest}
 
-   stap_list "process($valid_pid).statement(\"foo@$test.c:29\").nearest" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:29\"\\\).nearest"
+   stap_list "process($valid_pid).statement(\"foo@$test.c:28\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:28\"\\\).nearest"
 
-   stap_list "process($valid_pid).statement(\"foo@$test.c+6\").nearest" \
-      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:29\"\\\).nearest"
+   stap_list "process($valid_pid).statement(\"foo@$test.c+5\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:28\"\\\).nearest"
+
+   stap_list "process($valid_pid).statement(\"foo@$test.c:23,24\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:2\[35\]\"\\\).nearest" {2}
+
+   stap_list "process($valid_pid).statement(\"foo@$test.c:*\").nearest" \
+      "re:process\\\(\"$exefullpath\"\\\)\\\.statement\\\(\"foo@\[^:\]+:\[0-9\]+\"\\\).nearest" {-1}
 }
 
 testing_probe {process(number).syscall}
