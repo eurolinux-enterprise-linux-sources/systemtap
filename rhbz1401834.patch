@@ -1,0 +1,21 @@
+commit e9befec1edff196b48c0b98b5ec9722efe7957e6
+Author: Martin Cermak <mcermak@redhat.com>
+Date:   Tue Dec 6 14:42:48 2016 +0100
+
+    Fix the initscript/99stap/check.in syntax.
+
+diff --git a/initscript/99stap/check.in b/initscript/99stap/check.in
+index 248ea54..2fa0621 100644
+--- a/initscript/99stap/check.in
++++ b/initscript/99stap/check.in
+@@ -4,8 +4,8 @@
+ . @dracutstap@/params.conf
+ 
+ # Do not include stap module if there are no scripts to include
+-[ "$ONBOOT_SCRIPTS" ] || return 1
++[ "$ONBOOT_SCRIPTS" ] || exit 1
+ # We're disabled by default: the initscript explicitly uses dracut's
+ # '--add stap' when creating the initramfs. Otherwise, we might be
+ # mistakenly included during e.g. kernel updates.
+-return 255
++exit 255

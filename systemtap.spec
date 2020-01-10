@@ -21,7 +21,7 @@
 %{!?with_java: %global with_java 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
 %{!?with_virthost: %global with_virthost 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
 %{!?with_virtguest: %global with_virtguest 1}
-%{!?with_dracut: %global with_dracut 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
+%{!?with_dracut: %global with_dracut 0%{?fedora} >= 19 || 0%{?rhel} >= 6}
 %ifarch x86_64
 %{!?with_mokutil: %global with_mokutil 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
 %{!?with_openssl: %global with_openssl 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
@@ -54,11 +54,21 @@
    %endif
 %endif
 
-%define dracutstap %{_prefix}/lib/dracut/modules.d/99stap
+%if 0%{?fedora} >= 19 || 0%{?rhel} >= 7
+   %define dracutstap %{_prefix}/lib/dracut/modules.d/99stap
+%else
+   %define dracutstap %{_prefix}/share/dracut/modules.d/99stap
+%endif
+
+%if 0%{?rhel} >= 6
+    %define dracutbindir /sbin
+%else
+    %define dracutbindir %{_bindir}
+%endif
 
 Name: systemtap
 Version: 2.9
-Release: 4%{?dist}
+Release: 7%{?dist}
 # for version, see also configure.ac
 
 
@@ -96,6 +106,8 @@ Source: ftp://sourceware.org/pub/systemtap/releases/systemtap-%{version}.tar.gz
 Patch10: xmlto-colwidth.patch
 Patch11: systemtap-2.9-pr19525-bulk-sigusr2.patch
 Patch12: rhbz1319085.patch
+Patch13: rhbz1320691.patch
+Patch14: rhbz1401834.patch
 
 # Build*
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -386,6 +398,8 @@ systemtap-runtime-virthost machine to execute systemtap scripts.
 %patch10 -p1
 %patch11 -p1
 %patch12 -p1
+%patch13 -p1
+%patch14 -p1
 
 %if %{with_bundled_elfutils}
 cd elfutils-%{elfutils_version}
@@ -469,7 +483,7 @@ cd ..
 %endif
 
 %if %{with_dracut}
-%global dracut_config --with-dracutstap=%{dracutstap}
+%global dracut_config --with-dracutstap=%{dracutstap} --with-dracutbindir=%{dracutbindir}
 %else
 %global dracut_config %{nil}
 %endif
@@ -588,6 +602,8 @@ done
 %if %{with_dracut}
    mkdir -p $RPM_BUILD_ROOT%{dracutstap}
    install -p -m 755 initscript/99stap/module-setup.sh $RPM_BUILD_ROOT%{dracutstap}
+   install -p -m 755 initscript/99stap/install $RPM_BUILD_ROOT%{dracutstap}
+   install -p -m 755 initscript/99stap/check $RPM_BUILD_ROOT%{dracutstap}
    install -p -m 755 initscript/99stap/start-staprun.sh $RPM_BUILD_ROOT%{dracutstap}
    touch $RPM_BUILD_ROOT%{dracutstap}/params.conf
 %endif
@@ -1025,6 +1041,15 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Tue Dec 06 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-7
+- BZ1401834 (init-time probing redux redux)
+
+* Thu Nov 24 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-6
+- BZ1320691 (init-time probing redux)
+
+* Wed Oct 26 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-5
+- BZ1320691 (init-time probing /sbin/new-kernel-pkg path fix)
+
 * Thu Mar 24 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-4
 - BZ1319085 (s390x udelay_simple) cont'd
 
