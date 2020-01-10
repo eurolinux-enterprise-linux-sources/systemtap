@@ -112,13 +112,10 @@ printscript(systemtap_session& s, ostream& o)
 
           // PR16730: We should only list probes that can be traced back to the
           // user's spec, not any auxiliary probes in the tapsets.
-          const source_loc& origin = chain.back()->tok->location;
-          if (origin.file != s.user_file)
-            {
-              if (s.verbose > 1)
-                cerr << "skipping probe " << pp << " from " << origin << endl;
-              continue;
-            }
+          // Also, do not want to the probes that are from the additional
+          // scripts (-E SCRIPT) to be listed.
+          if (!s.is_primary_probe(p))
+            continue;
 
           // Now duplicate-eliminate.  An alias may have expanded to
           // several actual derived probe points, but we only want to
@@ -345,9 +342,9 @@ run_sdt_benchmark(systemtap_session& s)
   gettimeofday (&tv_after, NULL);
   if (s.verbose > 0)
     clog << _F("Completed SDT benchmark in %ldusr/%ldsys/%ldreal ms.",
-               (tms_after.tms_utime - tms_before.tms_utime) * 1000 / _sc_clk_tck,
-               (tms_after.tms_stime - tms_before.tms_stime) * 1000 / _sc_clk_tck,
-               ((tv_after.tv_sec - tv_before.tv_sec) * 1000 +
+               (long)(tms_after.tms_utime - tms_before.tms_utime) * 1000 / _sc_clk_tck,
+               (long)(tms_after.tms_stime - tms_before.tms_stime) * 1000 / _sc_clk_tck,
+               (long)((tv_after.tv_sec - tv_before.tv_sec) * 1000 +
                 ((long)tv_after.tv_usec - (long)tv_before.tv_usec) / 1000))
          << endl;
 
@@ -567,8 +564,7 @@ passes_0_4 (systemtap_session &s)
               if (s.verbose>2)
                 clog << _F("Processing tapset \"%s\"", globbuf.gl_pathv[j]) << endl;
 
-              stapfile* f = parse_library_macros (s, globbuf.gl_pathv[j],
-                                                  true /* errs_as_warnings */);
+              stapfile* f = parse_library_macros (s, globbuf.gl_pathv[j]);
               if (f == 0)
                 s.print_warning(_F("macro tapset \"%s\" has errors, and will be skipped.", string(globbuf.gl_pathv[j]).c_str()));
               else
@@ -592,6 +588,13 @@ passes_0_4 (systemtap_session &s)
 
   for (unsigned i=0; i<s.include_path.size(); i++)
     {
+      unsigned tapset_flags = pf_guru | pf_squash_errors;
+
+      // The first path is special, as it's the builtin tapset.
+      // Allow all features no matter what s.compatible says.
+      if (i == 0)
+        tapset_flags |= pf_no_compatible;
+
       // now iterate upon it
       for (unsigned k=0; k<version_suffixes.size(); k++)
         {
@@ -654,9 +657,7 @@ passes_0_4 (systemtap_session &s)
               // root-equivalent privileges anyway; stapsys and stapusr use a remote compilation
               // with a trusted environment, where client-side $XDG_DATA_DIRS are not passed.
 
-              stapfile* f = parse (s, globbuf.gl_pathv[j],
-                                    true /* privileged */,
-                                    true /* errs_as_warnings */);
+              stapfile* f = parse (s, globbuf.gl_pathv[j], tapset_flags);
               if (f == 0)
                 s.print_warning(_F("tapset \"%s\" has errors, and will be skipped", string(globbuf.gl_pathv[j]).c_str()));
               else
@@ -687,32 +688,46 @@ passes_0_4 (systemtap_session &s)
       s.dump_mode == systemtap_session::dump_matched_probes ||
       s.dump_mode == systemtap_session::dump_matched_probes_vars)
     {
+      unsigned user_flags = s.guru_mode ? pf_guru : 0;
       if (s.script_file == "-")
         {
-          s.user_file = parse (s, cin, s.guru_mode,
-                               false /* errs_as_warnings */);
+          s.user_files.push_back (parse (s, "<input>", cin, user_flags));
         }
       else if (s.script_file != "")
         {
-          s.user_file = parse (s, s.script_file, s.guru_mode,
-                               false /* errs_as_warnings */);
+          s.user_files.push_back (parse (s, s.script_file, user_flags));
         }
       else if (s.cmdline_script != "")
         {
           istringstream ii (s.cmdline_script);
-          s.user_file = parse (s, ii, s.guru_mode,
-                               false /* errs_as_warnings */);
+          s.user_files.push_back(parse (s, "<input>", ii, user_flags));
         }
       else // listing mode
         {
           istringstream ii ("probe " + s.dump_matched_pattern + " {}");
-          s.user_file = parse (s, ii, s.guru_mode,
-                               false /* errs_as_warnings */);
+          s.user_files.push_back (parse (s, "<input>", ii, user_flags));
         }
-      if (s.user_file == 0)
+
+      // parses the additional script(s) (-E script). does so even if in listing
+      // mode, incase there is something special in the additional script(s),
+      // like a macro or alias. give them a unique name to differentiate the
+      // scripts that were inputted.
+      unsigned count = 1;
+      for (vector<string>::iterator script = s.additional_scripts.begin(); script != s.additional_scripts.end(); script++)
         {
-          // Syntax errors already printed.
-          rc ++;
+          string input_name = "<input" + lex_cast(count) + ">";
+          istringstream ii (*script);
+          s.user_files.push_back(parse (s, input_name, ii, user_flags));
+          count ++;
+        }
+
+      for(vector<stapfile*>::iterator it = s.user_files.begin(); it != s.user_files.end(); it++)
+        {
+          if (!(*it))
+            {
+              // Syntax errors already printed.
+              rc ++;
+            }
         }
     }
 
@@ -748,7 +763,8 @@ passes_0_4 (systemtap_session &s)
   else if (rc == 0 && s.last_pass == 1)
     {
       cout << _("# parse tree dump") << endl;
-      s.user_file->print (cout);
+      for (vector<stapfile*>::iterator it = s.user_files.begin(); it != s.user_files.end(); it++)
+        (*it)->print (cout);
       cout << endl;
       if (s.verbose)
         for (unsigned i=0; i<s.library_files.size(); i++)
@@ -972,6 +988,14 @@ passes_0_4 (systemtap_session &s)
 	  string module_dest_path = s.module_filename();
 	  copy_file(module_src_path, module_dest_path, s.verbose > 1);
 	}
+
+      // Copy uprobes module to the current directory.
+      if (s.save_uprobes && !s.uprobes_path.empty() && !pending_interrupts)
+        {
+          rc = create_dir("uprobes");
+          if (! rc)
+            copy_file(s.uprobes_path, "uprobes/uprobes.ko", s.verbose > 1);
+        }
     }
 
   PROBE1(stap, pass4__end, &s);

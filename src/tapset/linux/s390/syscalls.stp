@@ -42,6 +42,12 @@ probe syscall.getresuid16.return = kernel.function("sys32_getresuid16").return ?
 	retstr = return_str(1, $return)
 }
 
+%( systemtap_v < "2.7" %?
+# sys32_ipc() is just a syscall multiplexer (similar to
+# sys_socketcall()). So, we don't really need to probe it, since we'll
+# be probing what sys32_ipc() will call (semget, msgsnd, msgrcv,
+# shmat, etc.).
+
 # ipc _________________________________________________
 # long sys32_ipc(u32 call, int first, int second, int third, u32 ptr)
 #
@@ -50,11 +56,12 @@ probe syscall.ipc = kernel.function("sys32_ipc") ?
 	name = "ipc"
 	argstr = sprintf("%d, %d, %d, %d, %p", $call, $first, $second, $third, $ptr)
 }
-probe syscall.ipc.return = kernel.function("sys_ipc").return ?
+probe syscall.ipc.return = kernel.function("sys32_ipc").return ?
 {
 	name = "ipc"
 	retstr = return_str(1, $return)
 }
+%)
 
 # In kernels < 2.6.33, mmap()/mmap2() was handled by arch-specific
 # code.  In kernels >= 2.6.33, the arch-specific code just calls
@@ -67,7 +74,7 @@ probe syscall.ipc.return = kernel.function("sys_ipc").return ?
 probe syscall.mmap = __syscall.mmap ?, __syscall.mmap32 ?
 {
 	name = "mmap"
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", start, len,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", start, len,
 			 _mprotect_prot_str(prot), _mmap_flags(flags),
 			 fd, offset)
 }
@@ -75,7 +82,7 @@ probe __syscall.mmap = kernel.function("old_mmap") ?,
 		       kernel.function("SyS_s390_old_mmap") ?
 {
 	start = user_long(&@cast($arg, "mmap_arg_struct")->addr)
-	len = user_long(&@cast($arg, "mmap_arg_struct")->len)
+	len = user_ulong(&@cast($arg, "mmap_arg_struct")->len)
 	prot = user_long(&@cast($arg, "mmap_arg_struct")->prot)
 	flags = user_long(&@cast($arg, "mmap_arg_struct")->flags)
 	fd = user_long(&@cast($arg, "mmap_arg_struct")->fd)
@@ -84,7 +91,7 @@ probe __syscall.mmap = kernel.function("old_mmap") ?,
 probe __syscall.mmap32 = kernel.function("old32_mmap")
 {
 	start = user_int(&@cast($arg, "mmap_arg_struct_emu31")->addr)
-	len = user_int(&@cast($arg, "mmap_arg_struct_emu31")->len)
+	len = user_uint32(&@cast($arg, "mmap_arg_struct_emu31")->len)
 	prot = user_int(&@cast($arg, "mmap_arg_struct_emu31")->prot)
 	flags = user_int(&@cast($arg, "mmap_arg_struct_emu31")->flags)
 	fd = user_int(&@cast($arg, "mmap_arg_struct_emu31")->fd)
@@ -108,14 +115,14 @@ probe syscall.mmap.return = kernel.function("old_mmap").return ?,
 probe syscall.mmap2 = __syscall.mmap2 ?, __syscall.mmap2_32 ?
 {
         name = "mmap2"
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", start, length,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", start, length,
 			 _mprotect_prot_str(prot), _mmap_flags(flags),
 			 fd, pgoffset)
 }
 probe __syscall.mmap2 = kernel.function("sys_mmap2")
 {
 	start = user_long(&@cast($arg, "mmap_arg_struct")->addr)
-	length = user_long(&@cast($arg, "mmap_arg_struct")->len)
+	length = user_ulong(&@cast($arg, "mmap_arg_struct")->len)
 	prot = user_long(&@cast($arg, "mmap_arg_struct")->prot)
 	flags = user_long(&@cast($arg, "mmap_arg_struct")->flags)
 	fd = user_long(&@cast($arg, "mmap_arg_struct")->fd)
@@ -124,7 +131,7 @@ probe __syscall.mmap2 = kernel.function("sys_mmap2")
 probe __syscall.mmap2_32 = kernel.function("sys32_mmap2")
 {
 	start = user_int(&@cast($arg, "mmap_arg_struct_emu31")->addr)
-	length = user_int(&@cast($arg, "mmap_arg_struct_emu31")->len)
+	length = user_uint32(&@cast($arg, "mmap_arg_struct_emu31")->len)
 	prot = user_int(&@cast($arg, "mmap_arg_struct_emu31")->prot)
 	flags = user_int(&@cast($arg, "mmap_arg_struct_emu31")->flags)
 	fd = user_int(&@cast($arg, "mmap_arg_struct_emu31")->fd)
@@ -190,6 +197,45 @@ probe syscall.sysctl32 = kernel.function("sys32_sysctl") ?
 probe syscall.sysctl32.return = kernel.function("sys32_sysctl").return ?
 {
 	name = "sysctl"
+	retstr = return_str(1, $return)
+}
+
+# ftruncate64 _________________________________________________
+#
+# COMPAT_SYSCALL_DEFINE3(s390_ftruncate64, unsigned int, fd, u32, high,
+#			 u32, low)
+#
+probe syscall.compat_ftruncate64 = kernel.function("sys32_ftruncate64").call ?
+{
+        name = "ftruncate"
+        fd = __int32($fd)
+        length = (($high << 32) | $low)
+        argstr = sprintf("%d, %d", fd, length)
+}
+probe syscall.compat_ftruncate64.return =
+	kernel.function("sys32_ftruncate64").return ?
+{
+	name = "ftruncate"
+	retstr = return_str(1, $return)
+}
+
+# truncate64 __________________________________________________
+#
+# COMPAT_SYSCALL_DEFINE3(s390_truncate64, const char __user *, path,
+#			 u32, high, u32, low)
+#
+probe syscall.compat_truncate64 = kernel.function("sys32_truncate64").call ?
+{
+        name = "truncate"
+	path_uaddr = $path
+	path = user_string_quoted(path_uaddr)
+        length = (($high << 32) | $low)
+	argstr = sprintf("%s, %d", user_string_quoted(path_uaddr), length)
+}
+probe syscall.compat_truncate64.return =
+	kernel.function("sys32_truncate64").return ?
+{
+	name = "truncate"
 	retstr = return_str(1, $return)
 }
 

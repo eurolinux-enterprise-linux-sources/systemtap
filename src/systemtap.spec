@@ -21,15 +21,14 @@
 %else
 %{!?publican_brand: %global publican_brand fedora}
 %endif
-%ifnarch s390 s390x %{arm} aarch64 ppc64le
+%ifarch %{ix86} x86_64 ppc ppc64
 %{!?with_dyninst: %global with_dyninst 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
 %else
 %{!?with_dyninst: %global with_dyninst 0}
 %endif
 %{!?with_systemd: %global with_systemd 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
-%{!?with_emacsvim: %global with_emacsvim 1}
-%{!?with_java: %global with_java 1}
-# don't want to build runtime-virthost for f18 or RHEL5/6
+%{!?with_emacsvim: %global with_emacsvim 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
+%{!?with_java: %global with_java 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
 %{!?with_virthost: %global with_virthost 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
 %{!?with_virtguest: %global with_virtguest 1}
 %{!?with_dracut: %global with_dracut 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
@@ -40,6 +39,7 @@
 %{!?with_mokutil: %global with_mokutil 0}
 %{!?with_openssl: %global with_openssl 0}
 %endif
+%{!?with_pyparsing: %global with_pyparsing 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
 
 %ifarch ppc64le
 %global with_virthost 0
@@ -67,8 +67,8 @@
 %define dracutstap %{dracutlibdir}/modules.d/99stap
 
 Name: systemtap
-Version: 2.5
-Release: 2%{?dist}
+Version: 2.7
+Release: 1%{?dist}
 # for version, see also configure.ac
 
 
@@ -278,6 +278,9 @@ Summary: Static probe support tools
 Group: Development/System
 License: GPLv2+ and Public Domain
 URL: http://sourceware.org/systemtap/
+%if %{with_pyparsing}
+Requires: pyparsing
+%endif
 
 %description sdt-devel
 This package includes the <sys/sdt.h> header file used for static
@@ -302,7 +305,7 @@ Requires: strace
 # that provides nc has changed over time (from 'nc' to
 # 'nmap-ncat'). So, we'll do a file-based require.
 Requires: /usr/bin/nc
-%ifnarch ia64 ppc64le
+%ifnarch ia64 ppc64le aarch64
 Requires: prelink
 %endif
 # testsuite/systemtap.server/client.exp needs avahi
@@ -467,7 +470,13 @@ cd ..
 %global java_config --without-java
 %endif
 
-%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{publican_config} %{rpm_config} %{java_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
+%if %{with_virthost}
+%global virt_config --enable-virt
+%else
+%global virt_config --disable-virt
+%endif
+
+%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{publican_config} %{rpm_config} %{java_config} %{virt_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
 make %{?_smp_mflags}
 
 %if %{with_emacsvim}
@@ -771,8 +780,8 @@ exit 0
 
 %triggerin runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64
-        %ifarch ppc64
+    %ifarch %{ix86} ppc64 ppc64le
+        %ifarch ppc64 ppc64le
             arch=ppc64
 	%else
 	    arch=i386
@@ -790,8 +799,8 @@ done
 
 %triggerun runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64
-        %ifarch ppc64
+    %ifarch %{ix86} ppc64 ppc64le
+        %ifarch ppc64 ppc64le
             arch=ppc64
 	%else
 	    arch=i386
@@ -808,8 +817,8 @@ done
 %triggerpostun runtime-java -- java-1.7.0-openjdk, java-1.6.0-openjdk
 # Restore links for any JDKs remaining after a package removal:
 for f in %{_libexecdir}/systemtap/libHelperSDT_*.so; do
-    %ifarch %{ix86} ppc64
-        %ifarch ppc64
+    %ifarch %{ix86} ppc64 ppc64le
+        %ifarch ppc64 ppc64le
             arch=ppc64
 	%else
 	    arch=i386
@@ -864,7 +873,9 @@ done
 %dir %attr(0755,stap-server,stap-server) %{_localstatedir}/log/stap-server
 %ghost %config(noreplace) %attr(0644,stap-server,stap-server) %{_localstatedir}/log/stap-server/log
 %ghost %attr(0755,stap-server,stap-server) %{_localstatedir}/run/stap-server
-%doc README README.unprivileged AUTHORS NEWS COPYING
+%doc README README.unprivileged AUTHORS NEWS 
+%{!?_licensedir:%global license %%doc}
+%license COPYING
 
 
 %files devel -f systemtap.lang
@@ -880,7 +891,9 @@ done
 %{_mandir}/man7/error*
 %{_mandir}/man7/stappaths.7*
 %{_mandir}/man7/warning*
-%doc README README.unprivileged AUTHORS NEWS COPYING
+%doc README README.unprivileged AUTHORS NEWS 
+%{!?_licensedir:%global license %%doc}
+%license COPYING
 %if %{with_java}
 %dir %{_libexecdir}/systemtap
 %{_libexecdir}/systemtap/libHelperSDT_*.so
@@ -921,12 +934,16 @@ done
 %if %{with_dyninst}
 %{_mandir}/man8/stapdyn.8*
 %endif
-%doc README README.security AUTHORS NEWS COPYING
+%doc README README.security AUTHORS NEWS 
+%{!?_licensedir:%global license %%doc}
+%license COPYING
 
 
 %files client -f systemtap.lang
 %defattr(-,root,root)
-%doc README README.unprivileged AUTHORS NEWS COPYING examples
+%doc README README.unprivileged AUTHORS NEWS examples
+%{!?_licensedir:%global license %%doc}
+%license COPYING
 %if %{with_docs}
 %doc docs.installed/*.pdf
 %doc docs.installed/tapsets/*.html
@@ -972,7 +989,9 @@ done
 %{_includedir}/sys/sdt.h
 %{_includedir}/sys/sdt-config.h
 %{_mandir}/man1/dtrace.1*
-%doc README AUTHORS NEWS COPYING
+%doc README AUTHORS NEWS 
+%{!?_licensedir:%global license %%doc}
+%license COPYING
 
 
 %files testsuite
@@ -1017,6 +1036,18 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Wed Feb 18 2015 Frank Ch. Eigler <fche@redhat.com> - 2.7-1
+- Upstream release.
+
+* Fri Sep 05 2014 Josh Stone <jistone@redhat.com> - 2.6-1
+- Upstream release.
+
+* Mon Jul 07 2014 Josh Stone <jistone@redhat.com>
+- Flip with_dyninst to an %ifarch whitelist.
+
+* Wed Apr 30 2014 Jonathan Lebon <jlebon@redhat.com> - 2.5-1
+- Upstream release.
+
 * Thu Feb 13 2014 Lukas Berk <lberk@redhat.com>
 - Add directory checks for runtime-java sym links
 

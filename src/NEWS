@@ -1,4 +1,114 @@
-* What's new in version 2.5
+* What's new in version 2.7, 2015-02-18
+
+- Some systemtap sample scripts are now identified with the "_best" keyword,
+  because they are generally useful or educational.  They are now promoted
+  within the generated index files.
+
+- Passing strings to and from functions has become faster due to optimization
+  (passing some strings by reference instead of by value/copy).  It may
+  be disabled by using the unoptimize flag (-u).
+
+  To make embedded-C functions eligible for the same optimization, use the pragma
+  /* unmodified-fnargs */ to indicate that the function body will not modify
+  the function arguments.  Remember to use MAXSTRINGLEN for string length,
+  rather than sizeof(string_arg) (which might now be a pointer).
+
+- SystemTap now allows .function probes to be specified by their full function
+  name, file, and declaration line number. Use the .statement probe to probe a
+  specific line number.
+
+- Tracepoint probes can now also be specified by the target subsystem. For
+  example, the following are all supported:
+
+  probe kernel.trace("sched:sched_switch") --> probe sched_switch found in the
+                                               sched subsystem
+  probe kernel.trace("sched:*") --> probe all tracepoints in sched subsystem
+
+  As a result, tapset functions such as pn() will now return a different string
+  than before. To retain the previous behaviour, use '--compatible=2.6'.
+
+- The following functions are deprecated in release 2.7:
+  - _adjtx_mode_str(), _statfs_f_type_str(), _waitid_opt_str(),
+    _internal_wait_opt_str(), and _epoll_events_str().
+
+- New tapset functions [u]symfileline(), [u]symfile() and [u]symline() will
+  return a string containing the specified portion of the filename:linenumber
+  match from a given address.
+
+  Using these functions may result in large generated modules from stored
+  address->file:line information.
+
+* What's new in version 2.6, 2014-09-05
+
+- SystemTap now supports on-the-fly arming/disarming of certain probe types:
+  kprobes, uprobes, and timer.*s(NUM) probes. For example, this probe
+
+  probe kernel.function("vfs_read") if (i > 4) { ... }
+
+  will automatically register/unregister the associated kprobe on vfs_read
+  whenever the value of the condition changes (as some probe handler
+  modifies 'i').  This allows us to avoid probe overhead when we're not
+  interested.  If the arming capability is not relevant/useful, nest the
+  condition in the normal probe handler:
+
+  probe kernel.function("vfs_read") { if (i > 4) { ... } }
+
+- statement("*@file:NNN").nearest probes now available to let systemtap
+  translate probe to nearest probe-able line to one given if necessary
+
+- process("PATH").library("PATH").plt("NAME").return probes are now supported.
+
+- SystemTap now supports SDT probes with operands that refer to symbols.
+
+- While in listing mode (-l/-L), probes printed are now more consistent
+  and precise.
+
+- Statement probes now support enumerated linenos to probe discontiguous
+  linenos using the form:
+
+  process.statement("foo@file.c:3,5-7,9")
+
+- Statement counting is now suppressed in the generated c code for probes that
+  are non-recursive and loop-free. Statement counting can be turned back on in
+  unoptimize mode (-u).
+
+- SystemTap now asserts that the PID provided for a process probe corresponds
+  to a running process.
+
+- DWARF process probes can be bound to a specific process using the form:
+
+  process(PID).function("*")
+
+- SystemTap now accepts additional scripts through the new -E SCRIPT option.
+  There still needs to be a main script specified through -e or file in order
+  to provide an additional script. This makes it feasible to have scripts in
+  the $HOME/.systemtap/rc file.  For example:
+
+  -E 'probe begin, end, error { log("systemtap script " . pn()) }'
+  -E 'probe timer.s(30) { error ("timeout") }
+
+  The -E SCRIPT option can also be used in listing mode (-l/-L), such that
+  probe points for the additional scripts will not listed, but other parts of
+  the script are still available, such as macros or aliases.
+
+- SystemTap now supports array slicing within foreach loop conditions, delete
+  statements and membership tests. Wildcards are represented by "*". Examples
+  of the expressions are:
+
+  foreach ([a,b,c] in val[*,2,*])
+  delete val[*, 2, *]
+  [*, 2, *] in val
+
+- Integer expressions which are derived from DWARF values, like context $vars,
+  @cast, and @var, will now carry that type information into subsequent reads.
+  Such expressions can now use "->" and "[]" operators, as can local variables
+  which were assigned such values.
+
+  foo = $param->foo; printf("x:%d y:%d\n", foo->x, foo->y)
+  printf("my value is %d\n", ($type == 42 ? $foo : $bar)->value)
+  printf("my parent pid is %d\n", task_parent(task_current())->tgid)
+
+* What's new in version 2.5, 2014-04-30
 
 - Systemtap now supports backtracing through its own, invoking module.
 
@@ -47,6 +157,7 @@
   machine-owner-keys maintained by a trusted stap-server on the
   network.  (Key enrollment requires a one-time reboot and BIOS
   conversation.)
+  https://sourceware.org/systemtap/wiki/SecureBoot
 
 - SystemTap now reports more accurate and succinct errors on type
   mismatches.

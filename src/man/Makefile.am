@@ -1,7 +1,7 @@
 # Makefile.am --- automake input file for systemtap man pages
 ## process this file with automake to produce Makefile.in
 
-AUTOMAKE_OPTIONS = no-dist foreign
+AUTOMAKE_OPTIONS = no-dist foreign subdir-objects
 
 man_MANS = stapprobes.3stap stapfuncs.3stap stapvars.3stap stapex.3stap \
 	dtrace.1 stap-merge.1 stappaths.7 stapsh.8 systemtap.8
@@ -28,9 +28,7 @@ man_MANS += stap-server.8
 endif
 endif
 
-if HAVE_LIBVIRT
-if HAVE_LIBXML2
+if BUILD_VIRT
 man_MANS += stapvirt.1
-endif
 endif
 

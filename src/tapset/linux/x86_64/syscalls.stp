@@ -97,7 +97,7 @@ probe syscall.mmap = kernel.function("sys_mmap") ?
 	# user-side it is a signed int.  Fix this.
 	fd = __int32($fd)
 	offset = $off
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr, $len,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", $addr, $len,
 		_mprotect_prot_str($prot), _mmap_flags($flags),
 		__int32($fd), $off)
 }
@@ -130,7 +130,7 @@ probe syscall.mmap32 = kernel.function("sys32_mmap")
 		fd = user_long(&@cast($arg, "mmap_arg_struct")->fd)
 		offset = user_long(&@cast($arg, "mmap_arg_struct")->offset)
 	}
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", start, len,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", start, len,
 			 _mprotect_prot_str(prot), _mmap_flags(flags),
 			 fd, offset)
 }
@@ -156,7 +156,7 @@ probe syscall.mmap2 = __syscall.mmap2 ?, __syscall.mmap_pgoff ?
 	# Although the kernel gets an unsigned long fd, on the
 	# user-side it is a signed int.  Fix this.
         fd = __int32($fd)
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr, $len,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", $addr, $len,
 		_mprotect_prot_str($prot), _mmap_flags($flags),
 		__int32($fd), pgoffset)
 }
@@ -192,6 +192,7 @@ probe syscall.vm86_warning.return = kernel.function("sys32_vm86_warning").return
 	name = "wm86_warning"
 	retstr = return_str(1, $return)
 }
+
 # pipe _______________________________________________________
 #
 # long sys32_pipe(int __user *fd)
@@ -237,5 +238,69 @@ probe syscall.pipe32.return = kernel.function("sys32_pipe").return?
 		pipe0 = 0;
 		pipe1 = 0;
 	}
+	retstr = return_str(1, $return)
+}
+
+# ftruncate _______________________________________________________
+#
+# asmlinkage long sys32_ftruncate64(unsigned int fd, unsigned long offset_low,
+#				    unsigned long offset_high)
+#
+probe syscall.compat_ftruncate64 = kernel.function("sys32_ftruncate64").call ?
+{
+        name = "ftruncate"
+        fd = __int32($fd)
+        length = (($offset_high << 32) | $offset_low)
+        argstr = sprintf("%d, %d", fd, length)
+}
+probe syscall.compat_ftruncate64.return =
+	kernel.function("sys32_ftruncate64").return ?
+{
+	name = "ftruncate"
+	retstr = return_str(1, $return)
+}
+
+# truncate _______________________________________________________
+#
+# asmlinkage long sys32_truncate64(const char __user *filename,
+#				   unsigned long offset_low,
+#				   unsigned long offset_high)
+#
+probe syscall.compat_truncate64 = kernel.function("sys32_truncate64").call ?
+{
+        name = "truncate"
+	path_uaddr = $filename
+	path = user_string_quoted(path_uaddr)
+        length = (($offset_high << 32) | $offset_low)
+	argstr = sprintf("%s, %d", user_string_quoted(path_uaddr), length)
+}
+probe syscall.compat_truncate64.return =
+	kernel.function("sys32_truncate64").return ?
+{
+	name = "truncate"
+	retstr = return_str(1, $return)
+}
+
+# fadvise64 _______________________________________________________
+#
+# asmlinkage long sys32_fadvise64(int fd, unsigned offset_lo,
+#				  unsigned offset_hi,
+#				  size_t len, int advice)
+#
+probe syscall.compat_fadvise64 = kernel.function("sys32_fadvise64").call ?
+{
+        name = "fadvise64"
+	fd = __int32($fd)
+
+        offset = (($offset_hi << 32) | $offset_lo)
+	len = __int32($len)
+	advice = __int32($advice)
+	argstr = sprintf("%d, %d, %d, %s", __int32($fd), offset, len,
+			 _fadvice_advice_str(__int32($advice)))
+}
+probe syscall.compat_fadvise64.return =
+	kernel.function("sys32_fadvise64").return ?
+{
+	name = "fadvise64"
 	retstr = return_str(1, $return)
 }

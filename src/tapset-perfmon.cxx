@@ -94,6 +94,7 @@ perf_derived_probe::join_group (systemtap_session& s)
   if (! s.perf_derived_probes)
     s.perf_derived_probes = new perf_derived_probe_group ();
   s.perf_derived_probes->enroll (this);
+  this->group = s.perf_derived_probes;
 
   if (has_process && !has_counter)
     enable_task_finder(s);
@@ -228,7 +229,7 @@ perf_derived_probe_group::emit_module_decls (systemtap_session& s)
   s.op->newline(-1) << "}";
 
   s.op->newline() << "(*stp->probe->ph) (c);";
-  common_probe_entryfn_epilogue (s, true);
+  common_probe_entryfn_epilogue (s, true, otf_safe_context(s));
   s.op->newline(-1) << "}";
   s.op->newline();
   if (have_a_process_tag)
@@ -309,7 +310,12 @@ perf_builder::build(systemtap_session & sess,
 	throw SEMANTIC_ERROR(_("missing perf probe counter component name"));
 
       period = 0;		// perf_event_attr.sample_freq should be 0
-      if (sess.perf_counters.count(var) > 0)
+      vector<std::pair<string,string> >:: iterator it;
+      for (it=sess.perf_counters.begin() ;
+	   it != sess.perf_counters.end(); it++)
+	if ((*it).first == var)
+	  break;
+      if (it != sess.perf_counters.end())
 	throw SEMANTIC_ERROR(_("duplicate counter name"));
 
       // Splice a 'next' into the probe body, and then elaborate.cxx's
@@ -323,9 +329,18 @@ perf_builder::build(systemtap_session & sess,
   string proc_n;
   if ((proc_p = has_null_param(parameters, TOK_PROCESS)))
     {
-      proc_n = sess.cmd_file();
+      try
+        {
+          proc_n = sess.cmd_file();
+        }
+      catch (semantic_error& e)
+        {
+          throw SEMANTIC_ERROR(_("invalid -c command for unspecified process"
+                                 " probe [man stapprobes]"), NULL, NULL, &e);
+        }
       if (proc_n.empty())
-	throw SEMANTIC_ERROR(_("process probe is invalid without a -c COMMAND"));
+	throw SEMANTIC_ERROR(_("unspecified process probe is invalid without a "
+                               "-c COMMAND [man stapprobes]"));
     }
   else
     proc_p = get_param(parameters, TOK_PROCESS, proc_n);
@@ -336,11 +351,17 @@ perf_builder::build(systemtap_session & sess,
     clog << _F("perf probe type=%" PRId64 " config=%" PRId64 " period=%" PRId64 " process=%s counter=%s",
 	       type, config, period, proc_n.c_str(), var.c_str()) << endl;
 
+  // The user-provided pp is already well-formed. Let's add a copy on the chain
+  // and set it as the new base
+  probe_point *new_location = new probe_point(*location);
+  new_location->well_formed = true;
+  probe *new_base = new probe(base, new_location);
+
   finished_results.push_back
-    (new perf_derived_probe(base, location, type, config, period, proc_p,
+    (new perf_derived_probe(new_base, location, type, config, period, proc_p,
 			    has_counter, proc_n, var));
   if (!var.empty())
-    sess.perf_counters[var] = make_pair(proc_n,finished_results.back());
+    sess.perf_counters.push_back(make_pair (var, proc_n));
 }
 
 

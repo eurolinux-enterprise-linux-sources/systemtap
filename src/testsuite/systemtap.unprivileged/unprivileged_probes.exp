@@ -36,9 +36,9 @@ set unrestricted_probe_types [list \
   "process.function(string).callees" \
   "process.function(string).callees(number)" \
   "process.plt" \
-  "process.plt.statement(number)" \
+  "process.plt.return" \
   "process.plt(string)" \
-  "process.plt(string).statement(number)" \
+  "process.plt(string).return" \
   "process.library(string).function(number)" \
   "process.library(string).function(number).call" \
   "process.library(string).function(number).inline" \
@@ -54,17 +54,21 @@ set unrestricted_probe_types [list \
   "process.library(string).function(string).callees" \
   "process.library(string).function(string).callees(number)" \
   "process.library(string).plt" \
-  "process.library(string).plt.statement(number)" \
+  "process.library(string).plt.return" \
   "process.library(string).plt(string)" \
-  "process.library(string).plt(string).statement(number)" \
+  "process.library(string).plt(string).return" \
   "process.library(string).mark(string)" \
   "process.library(string).provider(string).mark(string)" \
   "process.library(string).statement(number)" \
+  "process.library(string).statement(number).nearest" \
   "process.library(string).statement(string)" \
+  "process.library(string).statement(string).nearest" \
   "process.provider(string).mark(string)" \
   "process.mark(string)" \
   "process.statement(number)" \
+  "process.statement(number).nearest" \
   "process.statement(string)" \
+  "process.statement(string).nearest" \
   "process.syscall" \
   "process.syscall.return" \
   "process.thread.begin" \
@@ -77,6 +81,29 @@ set unrestricted_probe_types [list \
   "process(number).syscall.return" \
   "process(number).thread.begin" \
   "process(number).thread.end" \
+  "process(number).function(number)" \
+  "process(number).function(number).call" \
+  "process(number).function(number).exported" \
+  "process(number).function(number).return" \
+  "process(number).function(string)" \
+  "process(number).function(string).call" \
+  "process(number).function(string).callee(string)" \
+  "process(number).function(string).callees" \
+  "process(number).function(string).callees(number)" \
+  "process(number).function(string).exported" \
+  "process(number).function(string).inline" \
+  "process(number).function(string).label(string)" \
+  "process(number).function(string).return" \
+  "process(number).mark(string)" \
+  "process(number).plt" \
+  "process(number).plt.return" \
+  "process(number).plt(string)" \
+  "process(number).plt(string).return" \
+  "process(number).provider(string).mark(string)" \
+  "process(number).statement(number)" \
+  "process(number).statement(number).nearest" \
+  "process(number).statement(string)" \
+  "process(number).statement(string).nearest" \
   "process(string).begin" \
   "process(string).end" \
   "process(string).function(number)" \
@@ -110,19 +137,23 @@ set unrestricted_probe_types [list \
   "process(string).library(string).mark(string)" \
   "process(string).library(string).provider(string).mark(string)" \
   "process(string).library(string).statement(number)" \
+  "process(string).library(string).statement(number).nearest" \
   "process(string).library(string).statement(string)" \
+  "process(string).library(string).statement(string).nearest" \
   "process(string).library(string).plt" \
-  "process(string).library(string).plt.statement(number)" \
+  "process(string).library(string).plt.return" \
   "process(string).library(string).plt(string)" \
-  "process(string).library(string).plt(string).statement(number)" \
+  "process(string).library(string).plt(string).return" \
   "process(string).mark(string)" \
   "process(string).provider(string).mark(string)" \
   "process(string).statement(number)" \
+  "process(string).statement(number).nearest" \
   "process(string).statement(string)" \
+  "process(string).statement(string).nearest" \
   "process(string).plt" \
-  "process(string).plt.statement(number)" \
+  "process(string).plt.return" \
   "process(string).plt(string)" \
-  "process(string).plt(string).statement(number)" \
+  "process(string).plt(string).return" \
   "process(string).syscall" \
   "process(string).syscall.return" \
   "process(string).thread.begin" \
@@ -176,8 +207,10 @@ set restricted_probe_types [list \
   "kernel.mark(string)" \
   "kernel.mark(string).format(string)" \
   "kernel.statement(number)" \
+  "kernel.statement(number).nearest" \
   "kernel.statement(number).absolute" \
   "kernel.statement(string)" \
+  "kernel.statement(string).nearest" \
   "kernel.trace(string)" \
   "kprobe.function(string)" \
   "kprobe.function(string).call" \
@@ -204,7 +237,9 @@ set restricted_probe_types [list \
   "module(string).function(string).callees" \
   "module(string).function(string).callees(number)" \
   "module(string).statement(number)" \
+  "module(string).statement(number).nearest" \
   "module(string).statement(string)" \
+  "module(string).statement(string).nearest" \
   "perf.type(number).config(number)" \
   "perf.type(number).config(number).sample(number)" \
   "perf.type(number).config(number).counter(string)" \

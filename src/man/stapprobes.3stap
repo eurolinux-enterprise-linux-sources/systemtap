@@ -143,12 +143,32 @@ process.function, .statement	begin, end, error, never
 process.mark \fI(backup)\fP	timer
 	perf
 	procfs
-\fBAUTO-DWARF\fP	kernel.statement.absolute
+\fBAUTO-GENERATED-DWARF\fP	kernel.statement.absolute
 	kernel.data
 kernel.trace	kprobe.function
 	process.statement.absolute
-	process.begin, .end, .error
+	process.begin, .end
+	netfilter
+	java
 .TE
+
+.SH ON-THE-FLY ARMING
+
+The following types of probe points may be armed/disarmed on-the-fly
+to save overheads during uninteresting times.  Arming conditions may
+also be added to other types of probes, but will be treated as a
+wrapping conditional and won't benefit from overhead savings.
+
+.TS
+l l.
+\fBDISARMABLE	exceptions\fP
+kernel.function, kernel.statement
+module.function, module.statement
+process.*.function, process.*.statement
+process.*.plt, process.*.mark
+timer.	timer.profile
+java
+.TE 
 
 .SH PROBE POINT FAMILIES
 
@@ -244,11 +264,15 @@ The name of the system call.
 .IR retstr
 For return probes, a pretty-printed form of the system-call result.
 .PP
-As usual for probe aliases, these variables are all simply initialized
-once from the underlying $context variables, so that later changes to
+As usual for probe aliases, these variables are all initialized once
+from the underlying $context variables, so that later changes to
 $context variables are not automatically reflected.  Not all probe
 aliases obey all of these general guidelines.  Please report any
-bothersome ones you encounter as a bug.
+bothersome ones you encounter as a bug.  Note that on some
+kernel/userspace architecture combinations (e.g., 32-bit userspace on
+64-bit kernel), the underlying $context variables may need explicit
+sign extension / masking.  When this is an issue, consider using the
+tapset-provided variables instead of raw $context variables.
 .PP
 If debuginfo availability is a problem, you may try using the
 non-DWARF syscall probe aliases instead.  Use the
@@ -350,16 +374,24 @@ module(MPATTERN).function(PATTERN).return
 module(MPATTERN).function(PATTERN).inline
 module(MPATTERN).function(PATTERN).label(LPATTERN)
 kernel.statement(PATTERN)
+kernel.statement(PATTERN).nearest
 kernel.statement(ADDRESS).absolute
 module(MPATTERN).statement(PATTERN)
 process("PATH").function("NAME")
 process("PATH").statement("*@FILE.c:123")
 process("PATH").library("PATH").function("NAME")
 process("PATH").library("PATH").statement("*@FILE.c:123")
+process("PATH").library("PATH").statement("*@FILE.c:123").nearest
 process("PATH").function("*").return
 process("PATH").function("myfun").label("foo")
 process("PATH").function("foo").callee("bar")
 process("PATH").function("foo").callees(DEPTH)
+process(PID).function("NAME")
+process(PID).function("myfun").label("foo")
+process(PID).plt("NAME")
+process(PID).plt("NAME").return
+process(PID).statement("*@FILE.c:123")
+process(PID).statement("*@FILE.c:123").nearest
 process(PID).statement(ADDRESS).absolute
 .ESAMPLE
 (See the USER-SPACE section below for more information on the process
@@ -394,6 +426,9 @@ Filters the results to include only exported functions.
 Places a probe at the exact spot, exposing those local variables that
 are visible there.
 .TP
+\fB.statement.nearest\fR
+Places a probe at the nearest available spot to the given statement.
+.TP
 \fB.callee\fR
 Places a probe on the callee function given in the \fB.callee\fR
 modifier, where the callee must be a function called by the target
@@ -419,16 +454,21 @@ will probe both callees of the target function, as well as callees of
 those callees. And \fB.callees(3)\fR goes one level deeper, etc...
 A callee probe at depth N is only triggered when the N callers in the
 callstack match those that were statically determined during analysis
-(this also may be overriden using -DSTAP_CALLEE_MATCHALL).
+(this also may be overridden using -DSTAP_CALLEE_MATCHALL).
 .RE
 .PP
 In the above list of probe points, MPATTERN stands for a string literal
-that aims to identify the loaded kernel module of interest and LPATTERN
-stands for a source program label.  Both MPATTERN and LPATTERN may
-include the "*" "[]", and "?" wildcards.
-PATTERN stands for a string literal that
-aims to identify a point in the program.  It is made up of three
-parts:
+that aims to identify the loaded kernel module of interest. For in-tree
+kernel modules, the name suffices (e.g. "btrfs"). The name may also
+include the "*", "[]", and "?" wildcards to match multiple in-tree
+modules. Out-of-tree modules are also supported by specifying the full
+path to the ko file. Wildcards are not supported. The file must follow
+the convention of being named <module_name>.ko (characters ',' and '-'
+are replaced by '_').
+.PP
+LPATTERN stands for a source program label. It may also contain "*",
+"[]", and "?" wildcards. PATTERN stands for a string literal that aims
+to identify a point in the program.  It is made up of three parts:
 .IP \(bu 4
 The first part is the name of a function, as would appear in the
 .I nm
@@ -446,10 +486,11 @@ of a possibly long source directory path.
 Finally, the third part is optional if the file name part was given,
 and identifies the line number in the source file preceded by a ":"
 or a "+".  The line number is assumed to be an
-absolute line number if preceded by a ":", or relative to the entry of
-the function if preceded by a "+".  
+absolute line number if preceded by a ":", or relative to the
+declaration line of the function if preceded by a "+".
 All the lines in the function can be matched with ":*".  
-A range of lines x through y can be matched with ":x\-y".
+A range of lines x through y can be matched with ":x\-y". Ranges and
+specific lines can be mixed using commas, e.g. ":x,y\-z".
 .PP
 As an alternative, PATTERN may be a numeric constant, indicating an
 address.  Such an address may be found from symbol tables of the
@@ -643,7 +684,7 @@ kprobe.function(FUNCTION).return
 kprobe.module(NAME).function(FUNCTION)
 kprobe.module(NAME).function(FUNCTION).call
 kprobe.module(NAME).function(FUNCTION).return
-kprobe.statement.(ADDRESS).absolute
+kprobe.statement(ADDRESS).absolute
 .ESAMPLE
 .PP
 Probes of type
@@ -753,11 +794,14 @@ threads will be probed.  However, if systemtap was invoked with the
 .IR \-c " or " \-x
 options, then process probes are restricted to the process
 hierarchy associated with the target process.  If a process probe is
-specified without a PID or FULLPATH, but with the 
+unspecified (i.e. without a PID or FULLPATH), but with the
 .IR \-c "
 option, the PATH of the
 .IR \-c "
-cmd will be heuristically filled into the process PATH.
+cmd will be heuristically filled into the process PATH. In that case,
+only command parameters are allowed in the \fI-c\fR command (i.e. no
+command substitution allowed and no occurrences of any of these
+characters: '|&;<>(){}').
 
 .PP
 Third, symbolic static instrumentation compiled into programs and
@@ -766,6 +810,8 @@ probed:
 .SAMPLE
 process("PATH").mark("LABEL")
 process("PATH").provider("PROVIDER").mark("LABEL")
+process(PID).mark("LABEL")
+process(PID).provider("PROVIDER").mark("LABEL")
 .ESAMPLE
 .PP
 A
@@ -800,6 +846,10 @@ process("PATH").library("PATH").statement("*@FILE.c:123")
 process("PATH").function("*").return
 process("PATH").function("myfun").label("foo")
 process("PATH").function("foo").callee("bar")
+process("PATH").plt("NAME").return
+process(PID).function("NAME")
+process(PID).statement("*@FILE.c:123")
+process(PID).plt("NAME")
 .ESAMPLE
 
 .PP
@@ -810,18 +860,25 @@ to the working directory if they contain a "/" character, otherwise in
 .BR $PATH .
 If PATH names refer to scripts, the actual interpreters (specified in the
 script in the first line after the #! characters) are probed.
+
+.PP
 If PATH is a process component parameter referring to shared libraries
-then all processes that map it at runtime would be selected for
-probing.  If PATH is a library component parameter referring to shared
-libraries then the process specified by the process component would be
-selected.  
+then all processes that map it at runtime would be selected for probing.
+If PATH is a library component parameter referring to shared libraries
+then the process specified by the process component would be selected.
+Note that the PATH pattern in a library component will always apply to
+libraries statically determined to be in use by the process. However,
+you may also specify the full path to any library file even if not
+statically needed by the process.
 
 .PP
 A .plt probe will probe functions in the program linkage table
 corresponding to the rest of the probe point.  .plt can be specified
 as a shorthand for .plt("*").  The symbol name is available as a
 $$name context variable; function arguments are not available, since
-PLTs are processed without debuginfo.
+PLTs are processed without debuginfo.  A .plt.return probe places a
+probe at the moment \fBafter\fR the return from the named 
+function.
 
 .PP
 If the PATH string contains wildcards as in the MPATTERN case, then
@@ -912,7 +969,7 @@ result in a 0404 permission set for the file.
 .RI ( MODNAME
 is the name of the systemtap module). The
 .I proc
-filesystem is a pseudo-filesystem which is used an an interface to
+filesystem is a pseudo-filesystem which is used as an interface to
 kernel data structures. There are several probe point variants supported
 by the translator:
 
@@ -1110,15 +1167,54 @@ probes defined in
 export the lowercase names of the verdict constants (e.g. NF_DROP
 becomes nf_drop) as local variables.
 
-.SS MARKERS
+.SS KERNEL TRACEPOINTS
 
-This family of probe points hooks up to static probing markers
-inserted into the kernel or modules.  These markers are special macro
-calls inserted by kernel developers to make probing faster and more
-reliable than with DWARF-based probes.  Further, DWARF debugging
-information is 
+This family of probe points hooks up to static probing tracepoints
+inserted into the kernel or modules.  As with markers, these
+tracepoints are special macro calls inserted by kernel developers to
+make probing faster and more reliable than with DWARF-based probes,
+and DWARF debugging information is not required to probe tracepoints.
+Tracepoints have an extra advantage of more strongly-typed parameters
+than markers.
+
+Tracepoint probes look like:
+.BR kernel.trace("name") .
+The tracepoint name string, which may contain the usual wildcard
+characters, is matched against the names defined by the kernel
+developers in the tracepoint header files. To restrict the search to
+specific subsystems (e.g. sched, ext3, etc...), the following syntax
+can be used:
+.BR kernel.trace("system:name") .
+The tracepoint system string may also contain the usual wildcard
+characters.
+
+The handler associated with a tracepoint-based probe may read the
+optional parameters specified at the macro call site.  These are
+named according to the declaration by the tracepoint author.  For
+example, the tracepoint probe
+.BR kernel.trace("sched:sched_switch")
+provides the parameters
+.BR $prev " and " $next .
+If the parameter is a complex type, as in a struct pointer, then a
+script can access fields with the same syntax as DWARF $target
+variables.  Also, tracepoint parameters cannot be modified, but in
+guru-mode a script may modify fields of parameters.
+
+The subsystem and name of the tracepoint are available in
+.BR $$system " and " $$name
+and a string of name=value pairs for all parameters of the tracepoint
+is available in
+.BR $$vars " or " $$parms .
+
+.SS KERNEL MARKERS (OBSOLETE)
+
+This family of probe points hooks up to an older style of static
+probing markers inserted into older kernels or modules.  These markers
+are special STAP_MARK macro calls inserted by kernel developers to
+make probing faster and more reliable than with DWARF-based probes.
+Further, DWARF debugging information is
 .I not
-required to probe markers.
+required to probe markers.  
 
 Marker probe points begin with 
 .BR kernel .
@@ -1142,42 +1238,6 @@ The marker format string associated with a marker is available in
 .BR $format .
 And also the marker name string is available in
 .BR $name .
-
-.SS TRACEPOINTS
-
-This family of probe points hooks up to static probing tracepoints
-inserted into the kernel or modules.  As with markers, these
-tracepoints are special macro calls inserted by kernel developers to
-make probing faster and more reliable than with DWARF-based probes,
-and DWARF debugging information is not required to probe tracepoints.
-Tracepoints have an extra advantage of more strongly-typed parameters
-than markers.
-
-Tracepoint probes begin with 
-.BR kernel .
-The next part names the tracepoint itself:
-.BR trace("name") .
-The tracepoint name string, which may contain the usual wildcard
-characters, is matched against the names defined by the kernel
-developers in the tracepoint header files.
-
-The handler associated with a tracepoint-based probe may read the
-optional parameters specified at the macro call site.  These are
-named according to the declaration by the tracepoint author.  For
-example, the tracepoint probe
-.BR kernel.trace("sched_switch")
-provides the parameters
-.BR $rq ", " $prev ", and " $next .
-If the parameter is a complex type, as in a struct pointer, then a
-script can access fields with the same syntax as DWARF $target
-variables.  Also, tracepoint parameters cannot be modified, but in
-guru-mode a script may modify fields of parameters.
-
-The name of the tracepoint is available in
-.BR $$name ,
-and a string of name=value pairs for all parameters of the tracepoint
-is available in
-.BR $$vars " or " $$parms .
 
 .SS HARDWARE BREAKPOINTS
 This family of probes is used to set hardware watchpoints for a given
@@ -1295,8 +1355,12 @@ a probe at the statement at that line number.  Use the
 kernel.statement
 probe instead.
 .TP
+kernel.trace("sched_*")
+refers to all scheduler-related (really, prefixed) tracepoints in
+the kernel.
+.TP
 kernel.mark("getuid")
-refers to an STAP_MARK(getuid, ...) macro call in the kernel.
+refers to an obsolete STAP_MARK(getuid, ...) macro call in the kernel.
 .TP
 module("usb*").function("*sync*").return
 refers to the moment of return from all functions with "sync" in the

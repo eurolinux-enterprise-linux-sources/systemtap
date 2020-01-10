@@ -105,16 +105,29 @@ static const string abrt_path =
                       ? "/usr/libexec/abrt-action-install-debuginfo-to-abrt-cache"
                     : ""));
 
-// The module name is the basename (without the extension) of the
-// module path, with ',' and '-' replaced by '_'.
-static string
+// The module name is the basename (without the extension) of the module path,
+// with ',' and '-' replaced by '_'. This is a (more or less safe) heuristic:
+// the actual name by which the module is known once inside the kernel is not
+// derived from the path, but from the .gnu.linkonce.this_module section of the
+// KO. In practice, modules in /lib/modules/ respect this convention, and we
+// require it as well for out-of-tree kernel modules.
+string
 modname_from_path(const string &path)
 {
-  size_t dot = path.rfind('.');
   size_t slash = path.rfind('/');
-  if (dot == string::npos || slash == string::npos || dot < slash)
+  if (slash == string::npos)
     return "";
-  string name = path.substr(slash + 1, dot - slash - 1);
+  string name = path.substr(slash + 1);
+
+  // First look for .ko extension variants like ".ko" or ".ko.xz"
+  // If that fails, look for any ".*" extension at all.
+  size_t extension = name.rfind(".ko");
+  if (extension == string::npos)
+    extension = name.rfind('.');
+  if (extension == string::npos)
+    return "";
+
+  name.erase(extension);
   replace_if(name.begin(), name.end(), is_comma_dash, '_');
   return name;
 }

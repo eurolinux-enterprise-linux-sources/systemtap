@@ -539,6 +539,16 @@ probe nd_syscall.sched_setscheduler.return ?
 	printf("%s %s\n", name, retstr)
 }
 
+probe nd_syscall.seccomp ?
+{
+	printf("%s %s\n", name, argstr)
+	printf("%d %d %s\n", op, flags, uargs)
+}
+probe nd_syscall.seccomp.return ?
+{
+	printf("%s %s\n", name, retstr)
+}
+
 probe nd_syscall.sched_yield
 {
 	printf("%s(%s)\n", name, argstr)
@@ -562,7 +572,7 @@ probe nd_syscall.select.return, nd_syscall.compat_select.return ?
 probe nd_syscall.semctl ?, nd_syscall.compat_sys_semctl ?
 {
 	printf("%s(%s)\n", name, argstr)
-	printf("%d %d %d\n", semid, semnum, cmd)
+	printf("%d %d %d(%s)\n", semid, semnum, cmd, cmdstr)
 }
 probe nd_syscall.semctl.return ?, nd_syscall.compat_sys_semctl.return ?
 {
@@ -572,7 +582,7 @@ probe nd_syscall.semctl.return ?, nd_syscall.compat_sys_semctl.return ?
 probe nd_syscall.semget ?
 {
 	printf("%s(%s)\n", name, argstr)
-	printf("%d %d %d\n", key, nsems, semflg)
+	printf("%d(%s) %d %d(%s)\n", key, key_str, nsems, semflg, semflg_str)
 }
 probe nd_syscall.semget.return ?
 {
@@ -723,7 +733,7 @@ probe nd_syscall.setitimer.return, nd_syscall.compat_setitimer.return ?
 probe nd_syscall.set_mempolicy ?
 {
 	printf("%s(%s)\n", name, argstr)
-	printf("%d %p %d\n", mode, nmask_uaddr, maxnode)
+	printf("%d(%s) %p %d\n", mode, mode_str, nmask_uaddr, maxnode)
 }
 probe nd_syscall.set_mempolicy.return ?
 {
@@ -853,8 +863,9 @@ probe nd_syscall.setuid.return
 probe nd_syscall.setxattr
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%p(%s), %p(%s), %p, %d, %d\n", path_uaddr, path, name_uaddr,
-	       name_str, value_uaddr, size, flags)
+	printf("%p(%s), %p(%s), %p(%s), %d, %d(%s)\n", path_uaddr, path,
+	       name_uaddr, name_str, value_uaddr, value_str, size, flags,
+	       flags_str)
 }
 probe nd_syscall.setxattr.return
 {
@@ -896,7 +907,7 @@ probe nd_syscall.compat_sys_shmat.return ?
 probe nd_syscall.shmctl ?
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%d, %d, %p\n", shmid, cmd, buf_uaddr)
+	printf("%d, %d, %s, %p\n", shmid, cmd, cmd_str, buf_uaddr)
 }
 probe nd_syscall.shmctl.return ?
 {
@@ -909,7 +920,7 @@ probe nd_syscall.compat_sys_shmctl ?
 %( systemtap_v <= "2.5" %?
 	printf("%d, %d, %p\n", first, second, uptr_uaddr)
 %)
-	printf("%d, %d, %p\n", shmid, cmd, buf_uaddr)
+	printf("%d, %d, %s, %p\n", shmid, cmd, cmd_str, buf_uaddr)
 }
 probe nd_syscall.compat_sys_shmctl.return ?
 {
@@ -929,7 +940,7 @@ probe nd_syscall.shmdt.return
 probe nd_syscall.shmget ?
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%d, %d, %d\n", key, size, shmflg)
+	printf("%d, %d, %d, %s\n", key, size, shmflg, shmflg_str)
 }
 probe nd_syscall.shmget.return ?
 {
@@ -1056,7 +1067,7 @@ probe nd_syscall.splice.return ?
 probe nd_syscall.ssetmask ?
 {
 	printf("%s, %s\n", name, argstr)
-	printf("%d\n", newmask)
+	printf("%d, %s\n", newmask, newmask_str)
 }
 probe nd_syscall.ssetmask.return ?
 {
@@ -1370,12 +1381,12 @@ probe nd_syscall.unshare.return ?
 	printf("%s, %s\n", name, retstr)
 }
 
-probe nd_syscall.uselib
+probe nd_syscall.uselib ?
 {
 	printf("%s, %s\n", name, argstr)
 	printf("%p(%s)\n", library_uaddr, library)
 }
-probe nd_syscall.uselib.return
+probe nd_syscall.uselib.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }
@@ -1457,6 +1468,16 @@ probe nd_syscall.waitid
 	       infop_uaddr, options, options_str, rusage_uaddr)
 }
 probe nd_syscall.waitid.return
+{
+	printf("%s, %s\n", name, retstr)
+}
+
+probe nd_syscall.waitpid ?
+{
+	printf("%s, %s\n", name, argstr)
+	printf("%d, %p, %d(%s)\n", pid, status_uaddr, options, options_str)
+}
+probe nd_syscall.waitpid.return ?
 {
 	printf("%s, %s\n", name, retstr)
 }

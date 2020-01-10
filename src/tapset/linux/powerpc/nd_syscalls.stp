@@ -118,6 +118,12 @@ probe nd_syscall.sys32_sysinfo.return = kprobe.function("sys32_sysinfo").return 
 	retstr = returnstr(1)
 }
 
+%( systemtap_v <= "2.7" %?
+# sys32_ipc() is just a syscall multiplexer (similar to
+# sys_socketcall()). So, we don't really need to probe it, since we'll
+# be probing what sys32_ipc() will call (semget, msgsnd, msgrcv,
+# shmat, etc.).
+
 # ipc ________________________________________
 #
 # long sys32_ipc(u32 call, u32 first, u32 second, u32 third,
@@ -137,6 +143,7 @@ probe nd_syscall.ipc.return = kprobe.function("sys32_ipc").return ?
 	name = "sys_ipc"
 	retstr = returnstr(1)
 }
+%)
 
 # sys32_sigreturn ________________________________________
 #
@@ -668,15 +675,6 @@ probe nd_syscall.compat_set_mempolicy.return = kprobe.function("compat_set_mempo
 probe nd_syscall.mmap = kprobe.function("sys_mmap") ?
 {
 	name = "mmap"
-	// start = $addr
-	// len = $len
-	// prot = $prot
-	// flags = $flags
-	// fd = __int32($fd)
-	// offset = $offset
-	// argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr, $len,
-	// 		_mprotect_prot_str($prot), _mmap_flags($flags),
-	//		__int32($fd), $offset)
 	asmlinkage()
 	start = ulong_arg(1)
 	len = ulong_arg(2)
@@ -686,7 +684,7 @@ probe nd_syscall.mmap = kprobe.function("sys_mmap") ?
 	# user-side it is a signed int.  Fix this.
 	fd = int_arg(5)
 	offset = ulong_arg(6)
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", start, len,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", start, len,
 			_mprotect_prot_str(prot), _mmap_flags(flags),
 			fd, offset)
 }
@@ -708,15 +706,6 @@ probe nd_syscall.mmap2 = kprobe.function("sys_mmap2") ?,
                          kprobe.function("compat_sys_mmap2") ?
 {
 	name = "mmap2"
-	// start = $addr
-	// length = $len
-	// prot = $prot
-	// flags = $flags
-	// fd = __int32($fd)
-	// pgoffset = $pgoff
-	// argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr,
-	// 		$len, _mprotect_prot_str($prot), _mmap_flags($flags),
-	// 		$fd, $pgoff)
 	asmlinkage()
 	start = ulong_arg(1)
 	length = ulong_arg(2)
@@ -726,7 +715,7 @@ probe nd_syscall.mmap2 = kprobe.function("sys_mmap2") ?,
 	# user-side it is a signed int.  Fix this.
 	fd = int_arg(5)
 	pgoffset = ulong_arg(6)
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", start,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", start,
 			length, _mprotect_prot_str(prot), _mmap_flags(flags),
 			fd, pgoffset)
 }
@@ -757,24 +746,67 @@ probe nd_syscall.ppc64_sys_stime.return = kprobe.function("ppc64_sys_stime").ret
 	retstr = returnstr(1)
 }
 
-# ppc64_newuname ________________________________________
+# ppc[64]_newuname ________________________________________
 #
 # asmlinkage int ppc64_newuname(struct new_utsname __user * name)
+# long ppc_newuname(struct new_utsname __user * name)
 #
-probe nd_syscall.ppc64_newuname = kprobe.function("ppc64_newuname") ?
+probe nd_syscall.ppc64_newuname = __nd_syscall.ppc64_newuname ?,
+	kprobe.function("ppc_newuname") ?
 {
-	name = "ppc64_newuname"
-	// name_uaddr = $name
-	asmlinkage()
+	name = "uname"
 	name_uaddr = pointer_arg(1)
 	argstr = sprintf("%p", name_uaddr)
 }
-probe nd_syscall.ppc64_newuname.return = kprobe.function("ppc64_newuname").return ?
+probe __nd_syscall.ppc64_newuname = kprobe.function("ppc64_newuname") ?
 {
-	name = "ppc64_newuname"
+	asmlinkage()
+}
+probe nd_syscall.ppc64_newuname.return =
+	kprobe.function("ppc64_newuname").return ?,
+	kprobe.function("ppc_newuname").return ?
+{
+	name = "uname"
 	retstr = returnstr(1)
 }
 
+# compat_ftruncate64 ________________________________________
 #
+# asmlinkage int compat_sys_ftruncate64(unsigned int fd, u32 reg4,
+#					unsigned long high, unsigned long low)
 #
+probe nd_syscall.compat_ftruncate64 =
+	kprobe.function("compat_sys_ftruncate64") ?
+{
+	asmlinkage()
+	name = "ftruncate"
+	fd = int_arg(1)
+	length = (ulong_arg(3) << 32 | ulong_arg(4))
+	argstr = sprintf("%d, %d", fd, length)
+}
+probe nd_syscall.compat_ftruncate64.return =
+	kprobe.function("compat_sys_ftruncate64").return ?
+{
+	name = "ftruncate"
+	retstr = returnstr(1)
+}
 
+# compat_truncate64 ________________________________________
+#
+# asmlinkage int compat_sys_truncate64(const char __user * path, u32 reg4,
+#				       unsigned long high, unsigned long low)
+#
+probe nd_syscall.compat_truncate64 = kprobe.function("compat_sys_truncate64") ?
+{
+	name = "truncate"
+	path_uaddr = pointer_arg(1)
+	path = user_string_quoted(path_uaddr)
+	length = (ulong_arg(3) << 32 | ulong_arg(4))
+	argstr = sprintf("%s, %d", user_string_quoted(path_uaddr), length)
+}
+probe nd_syscall.compat_truncate64.return =
+	kprobe.function("compat_sys_truncate64").return ?
+{
+	name = "truncate"
+	retstr = returnstr(1)
+}

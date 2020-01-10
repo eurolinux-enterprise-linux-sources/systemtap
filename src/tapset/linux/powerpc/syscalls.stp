@@ -99,6 +99,12 @@ probe syscall.sys32_sysinfo.return = kernel.function("sys32_sysinfo").return ?
 	retstr = return_str(1, $return)
 }
 
+%( systemtap_v <= "2.7" %?
+# sys32_ipc() is just a syscall multiplexer (similar to
+# sys_socketcall()). So, we don't really need to probe it, since we'll
+# be probing what sys32_ipc() will call (semget, msgsnd, msgrcv,
+# shmat, etc.).
+
 # ipc ________________________________________
 #
 # long sys32_ipc(u32 call, u32 first, u32 second, u32 third,
@@ -115,6 +121,7 @@ probe syscall.ipc.return = kernel.function("sys32_ipc").return ?
 	name = "sys_ipc"
 	retstr = return_str(1, $return)
 }
+%)
 
 # sys32_sigreturn ________________________________________
 #
@@ -563,7 +570,7 @@ probe syscall.mmap = kernel.function("sys_mmap") ?
 	# user-side it is a signed int.  Fix this.
         fd = __int32($fd)
         offset = $offset
-        argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr, $len,
+        argstr = sprintf("%p, %u, %s, %s, %d, %d", $addr, $len,
                 _mprotect_prot_str($prot), _mmap_flags($flags),
 		__int32($fd), $offset)
 }
@@ -594,7 +601,7 @@ probe syscall.mmap2 = kernel.function("sys_mmap2") ?,
 	# user-side it is a signed int.  Fix this.
 	fd = __int32($fd)
 	pgoffset = $pgoff
-	argstr = sprintf("%p, %d, %s, %s, %d, %d", $addr,
+	argstr = sprintf("%p, %u, %s, %s, %d, %d", $addr,
 		$len, _mprotect_prot_str($prot), _mmap_flags($flags),
 		__int32($fd), $pgoff)
 }
@@ -622,22 +629,64 @@ probe syscall.ppc64_sys_stime.return = kernel.function("ppc64_sys_stime").return
 	name = "ppc64_sys_stime"
 	retstr = return_str(1, $return)
 }
-# ppc64_newuname ________________________________________
+
+# ppc[64]_newuname ________________________________________
 #
 # asmlinkage int ppc64_newuname(struct new_utsname __user * name)
+# long ppc_newuname(struct new_utsname __user * name)
 #
-probe syscall.ppc64_newuname = kernel.function("ppc64_newuname") ?
+probe syscall.ppc64_newuname = kernel.function("ppc64_newuname") ?,
+	kernel.function("ppc_newuname") ?
 {
-	name = "ppc64_newuname"
+	name = "uname"
 	name_uaddr = $name
 	argstr = sprintf("%p", name_uaddr)
 }
-probe syscall.ppc64_newuname.return = kernel.function("ppc64_newuname").return ?
+probe syscall.ppc64_newuname.return =
+	kernel.function("ppc64_newuname").return ?,
+	kernel.function("ppc_newuname").return ?
 {
-	name = "ppc64_newuname"
+	name = "uname"
 	retstr = return_str(1, $return)
 }
 
+# compat_ftruncate64 ________________________________________
 #
+# asmlinkage int compat_sys_ftruncate64(unsigned int fd, u32 reg4,
+#					unsigned long high, unsigned long low)
 #
+probe syscall.compat_ftruncate64 =
+	kernel.function("compat_sys_ftruncate64").call ?
+{
+	name = "ftruncate"
+	fd = __int32($fd)
+	length = ($high << 32 | $low)
+	argstr = sprintf("%d, %d", fd, length)
+}
+probe syscall.compat_ftruncate64.return =
+	kernel.function("compat_sys_ftruncate64").return ?
+{
+	name = "ftruncate"
+	retstr = return_str(1, $return)
+}
 
+# compat_truncate64 ________________________________________
+#
+# asmlinkage int compat_sys_truncate64(const char __user * path, u32 reg4,
+#				       unsigned long high, unsigned long low)
+#
+probe syscall.compat_truncate64 =
+	kernel.function("compat_sys_truncate64").call ?
+{
+	name = "truncate"
+	path_uaddr = $path
+	path = user_string_quoted(path_uaddr)
+	length = ($high << 32 | $low)
+	argstr = sprintf("%s, %d", user_string_quoted(path_uaddr), length)
+}
+probe syscall.compat_truncate64.return =
+	kernel.function("compat_sys_truncate64").return ?
+{
+	name = "truncate"
+	retstr = return_str(1, $return)
+}

@@ -25,6 +25,12 @@
 #include <string>
 #include <vector>
 
+// Old elf.h doesn't know about this machine type.
+#ifndef EM_AARCH64
+#define EM_AARCH64 183
+#endif
+
+
 extern "C" {
 #include <elfutils/libdwfl.h>
 #include <regex.h>
@@ -38,7 +44,7 @@ struct symbol_table;
 struct base_query;
 struct external_function_query;
 
-enum lineno_t { ABSOLUTE, RELATIVE, RANGE, WILDCARD };
+enum lineno_t { ABSOLUTE, RELATIVE, WILDCARD, ENUMERATED };
 enum info_status { info_unknown, info_present, info_absent };
 
 // module -> cu die[]
@@ -108,7 +114,7 @@ module_info
   std::set<std::string> plt_funcs;
   std::set<std::pair<std::string,std::string> > marks; /* <provider,name> */
 
-  void get_symtab(base_query *q);
+  void get_symtab();
   void update_symtab(cu_function_cache_t *funcs);
 
   module_info(const char *name) :
@@ -283,11 +289,15 @@ struct dwflpp
 
   template<typename T>
   int iterate_over_notes (T *object,
-			  void (* callback)(T*, int, const char*, size_t))
+                          void (* callback)(T*, const std::string&,
+                                                const std::string&,
+                                                int, const char*, size_t))
     {
       // See comment block in iterate_over_modules()
       return iterate_over_notes<void>((void*)object,
                                       (void (*)(void*,
+                                                const std::string&,
+                                                const std::string&,
                                                 int,
                                                 const char*,
                                                 size_t))callback);
@@ -314,11 +324,12 @@ struct dwflpp
 
   template<typename T>
   void iterate_over_srcfile_lines (char const * srcfile,
-                                   int linenos[2],
+                                   const std::vector<int>& linenos,
                                    enum lineno_t lineno_type,
                                    base_func_info_map_t& funcs,
                                    void (*callback) (Dwarf_Addr,
                                                      int, T*),
+                                   bool has_nearest,
                                    T *data)
     {
       // See comment block in iterate_over_modules()
@@ -328,15 +339,18 @@ struct dwflpp
                                        funcs,
                                        (void (*)(Dwarf_Addr,
                                                  int, void*))callback,
+                                       has_nearest,
                                        (void*)data);
     }
 
   template<typename T>
   void iterate_over_labels (Dwarf_Die *begin_die,
                             const std::string& sym,
-                            const std::string& function,
+                            const base_func_info& function,
+                            const std::vector<int>& linenos,
+                            enum lineno_t lineno_type,
                             T *data,
-                            void (* callback)(const std::string&,
+                            void (* callback)(const base_func_info&,
                                               const char*,
                                               const char*,
                                               int,
@@ -348,8 +362,10 @@ struct dwflpp
       iterate_over_labels<void>(begin_die,
                                 sym,
                                 function,
+                                linenos,
+                                lineno_type,
                                 (void*)data,
-                                (void (*)(const std::string&,
+                                (void (*)(const base_func_info&,
                                           const char*,
                                           const char*,
                                           int,
@@ -407,7 +423,7 @@ struct dwflpp
                                       std::string const & local,
                                       const target_symbol *e,
                                       bool lvalue,
-                                      exp_type & ty);
+                                      Dwarf_Die *die_mem);
   Dwarf_Die* type_die_for_local (std::vector<Dwarf_Die>& scopes,
                                  Dwarf_Addr pc,
                                  std::string const & local,
@@ -418,7 +434,7 @@ struct dwflpp
                                        Dwarf_Addr pc,
                                        const target_symbol *e,
                                        bool lvalue,
-                                       exp_type & ty);
+                                       Dwarf_Die *die_mem);
   Dwarf_Die* type_die_for_return (Dwarf_Die *scope_die,
                                   Dwarf_Addr pc,
                                   const target_symbol *e,
@@ -427,17 +443,26 @@ struct dwflpp
   std::string literal_stmt_for_pointer (Dwarf_Die *type_die,
                                         const target_symbol *e,
                                         bool lvalue,
-                                        exp_type & ty);
+                                        Dwarf_Die *die_mem);
   Dwarf_Die* type_die_for_pointer (Dwarf_Die *type_die,
                                    const target_symbol *e,
                                    Dwarf_Die *die_mem);
 
-  bool blacklisted_p(const std::string& funcname,
-                     const std::string& filename,
-                     int line,
-                     const std::string& module,
-                     Dwarf_Addr addr,
-                     bool has_return);
+  enum blacklisted_type
+    {  blacklisted_none, // not blacklisted
+       blacklisted_section,
+       blacklisted_kprobes,
+       blacklisted_function,
+       blacklisted_function_return,
+       blacklisted_file
+    };
+
+  blacklisted_type blacklisted_p(const std::string& funcname,
+                                 const std::string& filename,
+                                 int line,
+                                 const std::string& module,
+                                 Dwarf_Addr addr,
+                                 bool has_return);
 
   Dwarf_Addr relocate_address(Dwarf_Addr addr, std::string& reloc_section);
 
@@ -539,6 +564,12 @@ private:
   void collect_all_lines(char const * srcfile,
                          base_func_info_map_t& funcs,
                          lines_t& matching_lines);
+  std::pair<int,int> get_nearest_linenos(char const * srcfile,
+                                         int lineno,
+                                         base_func_info_map_t& funcs);
+  int get_nearest_lineno(char const * srcfile,
+                         int lineno,
+                         base_func_info_map_t& funcs);
   void suggest_alternative_linenos(char const * srcfile,
                                    int lineno,
                                    base_func_info_map_t& funcs);
@@ -565,6 +596,10 @@ private:
                                                  const target_symbol *e,
                                                  Dwarf_Die *vardie,
                                                  Dwarf_Attribute *fb_attr_mem);
+
+  std::string die_location_as_string(Dwarf_Addr, Dwarf_Die*);
+  std::string die_location_as_function_string(Dwarf_Addr, Dwarf_Die*);
+  std::string pc_die_line_string(Dwarf_Addr, Dwarf_Die*);
 
   struct location *translate_location(struct obstack *pool,
                                       Dwarf_Attribute *attr,
@@ -597,7 +632,7 @@ private:
                                        const target_symbol *e,
                                        std::string &,
                                        std::string &,
-                                       exp_type & ty);
+                                       Dwarf_Die *enddie);
 
   std::string express_as_string (std::string prelude,
                                  std::string postlude,
@@ -670,6 +705,8 @@ dwflpp::iterate_over_types<void>(Dwarf_Die *top_die,
                                  void *data);
 template<> int
 dwflpp::iterate_over_notes<void>(void *object, void (*callback)(void*,
+                                                                const std::string&,
+                                                                const std::string&,
                                                                 int,
                                                                 const char*,
                                                                 size_t));
@@ -682,18 +719,21 @@ dwflpp::iterate_over_plt<void>(void *object, void (*callback)(void*,
                                                               size_t));
 template<> void
 dwflpp::iterate_over_srcfile_lines<void>(char const * srcfile,
-                                         int linenos[2],
+                                         const std::vector<int>& linenos,
                                          enum lineno_t lineno_type,
                                          base_func_info_map_t& funcs,
                                          void (* callback) (Dwarf_Addr,
                                                             int, void*),
+                                         bool has_nearest,
                                          void *data);
 template<> void
 dwflpp::iterate_over_labels<void>(Dwarf_Die *begin_die,
                                   const std::string& sym,
-                                  const std::string& function,
+                                  const base_func_info& function,
+                                  const std::vector<int>& linenos,
+                                  enum lineno_t lineno_type,
                                   void *data,
-                                  void (* callback)(const std::string&,
+                                  void (* callback)(const base_func_info&,
                                                     const char*,
                                                     const char*,
                                                     int,

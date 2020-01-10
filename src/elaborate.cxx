@@ -61,7 +61,8 @@ expression* add_condition (expression* a, expression* b)
 
 
 derived_probe::derived_probe (probe *p, probe_point *l, bool rewrite_loc):
-  base (p), base_pp(l), sdt_semaphore_addr(0), session_index((unsigned)-1)
+  base (p), base_pp(l), group(NULL), sdt_semaphore_addr(0),
+  session_index((unsigned)-1)
 {
   assert (p);
   this->tok = p->tok;
@@ -155,27 +156,14 @@ probe_point*
 derived_probe::script_location () const
 {
   // This feeds function::pn() in the tapset, which is documented as the
-  // script-level probe point expression, *after wildcard expansion*.  If
-  // it were not for wildcard stuff, we'd just return the last item in the
-  // derivation chain.  But alas ... we need to search for the last one
-  // that doesn't have a * in the textual representation.  Heuristics, eww.
+  // script-level probe point expression, *after wildcard expansion*.
   vector<probe_point*> chain;
   collect_derivation_pp_chain (chain);
 
-  // NB: we actually start looking from the second-to-last item, so the user's
-  // direct input is not considered.  Input like 'kernel.function("init_once")'
-  // will thus be listed with the resolved @file:line too, disambiguating the
-  // distinct functions by this name, and matching our historical behavior.
-  for (int i=chain.size()-2; i>=0; i--)
-    {
-      probe_point pp_copy (* chain [i]);
-      // drop any ?/! denotations that would confuse a glob-char search
-      pp_copy.optional = false;
-      pp_copy.sufficient = false;
-      string pp_printed = lex_cast(pp_copy);
-      if (! contains_glob_chars(pp_printed))
-        return chain[i];
-    }
+  // Go backwards until we hit the first well-formed probe point
+  for (int i=chain.size()-1; i>=0; i--)
+    if (chain[i]->well_formed)
+      return chain[i];
 
   // If that didn't work, just fallback to -something-.
   return sole_location();
@@ -290,7 +278,12 @@ derived_probe_builder::has_null_param (std::map<std::string, literal*> const & p
   return (i != params.end() && i->second == NULL);
 }
 
-
+bool
+derived_probe_builder::has_param (std::map<std::string, literal*> const & params,
+                                       const std::string& key)
+{
+  return (params.find(key) != params.end());
+}
 
 // ------------------------------------------------------------------------
 // Members of match_key.
@@ -813,10 +806,14 @@ alias_derived_probe::alias_derived_probe(probe *base, probe_point *l,
   // XXX pretty nasty -- this was cribbed from printscript() in main.cxx
   assert (alias->alias_names.size() >= 1);
   alias_loc = new probe_point(*alias->alias_names[0]); // XXX: [0] is arbitrary; it would make just as much sense to collect all of the names
-  if (suffix) {
-    alias_loc->components.insert(alias_loc->components.end(),
-                                 suffix->begin(), suffix->end());
-  }
+  alias_loc->well_formed = true;
+  vector<probe_point::component*>::const_iterator it;
+  for (it = suffix->begin(); it != suffix->end(); ++it)
+    {
+      alias_loc->components.push_back(*it);
+      if (isglob((*it)->functor))
+        alias_loc->well_formed = false; // needs further derivation
+    }
 }
 
 alias_derived_probe::~alias_derived_probe ()
@@ -829,21 +826,6 @@ probe_point*
 alias_derived_probe::sole_location () const
 {
   return const_cast<probe_point*>(alias_loc);
-}
-
-
-probe*
-probe::create_alias(probe_point* l, probe_point* a)
-{
-  vector<probe_point*> aliases(1, a);
-  probe_alias* p = new probe_alias(aliases);
-  p->tok = tok;
-  p->locations.push_back(l);
-  p->body = body;
-  p->base = this;
-  p->privileged = privileged;
-  p->epilogue_style = false;
-  return new alias_derived_probe(this, l, p);
 }
 
 
@@ -989,6 +971,19 @@ derive_probes (systemtap_session& s,
                bool optional,
                bool rethrow_errors)
 {
+  // We need a static to track whether the current probe is optional so that
+  // even if we recurse into derive_probes with optional = false, errors will
+  // still be ignored. The undo_parent_optional bool ensures we reset the
+  // static at the same level we had it set.
+  static bool parent_optional = false;
+  bool undo_parent_optional = false;
+
+  if (optional && !parent_optional)
+    {
+      parent_optional = true;
+      undo_parent_optional = true;
+    }
+
   vector <semantic_error> optional_errs;
 
   for (unsigned i = 0; i < p->locations.size(); ++i)
@@ -1004,19 +999,13 @@ derive_probes (systemtap_session& s,
         {
           unsigned num_atbegin = dps.size();
 
-          // Pass down optional flag from e.g. alias reference to each
-          // probe_point instance.  We do this by temporarily overriding
-          // the probe_point optional flag.  We could instead deep-copy
-          // and set a flag on the copy permanently.
-          bool old_loc_opt = loc->optional;
-          loc->optional = loc->optional || optional;
           try
 	    {
 	      s.pattern_root->find_and_build (s, p, loc, 0, dps); // <-- actual derivation!
 	    }
           catch (const semantic_error& e)
 	    {
-              if (!loc->optional)
+              if (!loc->optional && !parent_optional)
                 throw semantic_error(e);
               else /* tolerate failure for optional probe */
                 {
@@ -1029,10 +1018,9 @@ derive_probes (systemtap_session& s,
                 }
 	    }
 
-          loc->optional = old_loc_opt;
           unsigned num_atend = dps.size();
 
-          if (! (loc->optional||optional) && // something required, but
+          if (! (loc->optional||parent_optional) && // something required, but
               num_atbegin == num_atend) // nothing new derived!
             throw SEMANTIC_ERROR (_("no match"));
 
@@ -1084,6 +1072,9 @@ derive_probes (systemtap_session& s,
             }
         }
     }
+
+  if (undo_parent_optional)
+    parent_optional = false;
 }
 
 
@@ -1106,32 +1097,14 @@ struct symbol_fetcher
     sym = e;
   }
 
-  void visit_target_symbol (target_symbol* e)
-  {
-    sym = e;
-  }
-
   void visit_arrayindex (arrayindex* e)
   {
     e->base->visit (this);
   }
 
-  void visit_atvar_op (atvar_op *e)
-  {
-    sym = e;
-  }
-
-  void visit_cast_op (cast_op* e)
-  {
-    sym = e;
-  }
-
   void throwone (const token* t)
   {
-    if (t->type == tok_operator && t->content == ".") // guess someone misused . in $foo->bar.baz expression
-      throw SEMANTIC_ERROR (_("Expecting symbol or array index expression, try -> instead"), t);
-    else
-      throw SEMANTIC_ERROR (_("Expecting symbol or array index expression"), t);
+    throw SEMANTIC_ERROR (_("Expecting symbol or array index expression"), t);
   }
 };
 
@@ -1412,50 +1385,107 @@ semantic_pass_vars (systemtap_session & sess)
 //
 // becomes:
 //
-// probe begin(MAX) { if (! (g1 || g2)) %{ disable_probe_foo %} }
 // probe foo { if (! (g1 || g2)) next; ... }
 // probe bar { ... g1 ++ ...;
 //             if (g1 || g2) %{ enable_probe_foo %} else %{ disable_probe_foo %}
 //           }
 //
-// XXX: As a first cut, do only the "inline probe condition" part of the
-// transform.
+// In other words, we perform two transformations:
+//    (1) Inline probe condition into its body.
+//    (2) For each probe that modifies a global var in use in any probe's
+//        condition, re-evaluate those probes' condition at the end of that
+//        probe's body.
+//
+// Here, we do all of (1), and half of (2): we simply collect the dependency
+// info between probes, which the translator will use to emit the affected
+// probes' condition re-evaluation. The translator will also ensure that the
+// conditions are evaluated using the globals' starting values prior to any
+// probes starting.
+
+// Adds the condition expression to the front of the probe's body
+static void
+derived_probe_condition_inline (derived_probe *p)
+{
+  expression* e = p->sole_location()->condition;
+  assert(e);
+
+  if_statement *ifs = new if_statement ();
+  ifs->tok = e->tok;
+  ifs->thenblock = new next_statement ();
+  ifs->thenblock->tok = e->tok;
+  ifs->elseblock = NULL;
+  unary_expression *notex = new unary_expression ();
+  notex->op = "!";
+  notex->tok = e->tok;
+  notex->operand = e;
+  ifs->condition = notex;
+  p->body = new block (ifs, p->body);
+}
 
 static int
 semantic_pass_conditions (systemtap_session & sess)
 {
+  map<derived_probe*, set<vardecl*> > vars_read_in_cond;
+  map<derived_probe*, set<vardecl*> > vars_written_in_body;
+
+  // do a first pass through the probes to ensure safety, inline any condition,
+  // and collect var usage
   for (unsigned i = 0; i < sess.probes.size(); ++i)
     {
       derived_probe* p = sess.probes[i];
       expression* e = p->sole_location()->condition;
+
       if (e)
         {
-          varuse_collecting_visitor vut(sess);
-          e->visit (& vut);
+          varuse_collecting_visitor vcv_cond(sess);
+          e->visit (& vcv_cond);
 
-          if (! vut.written.empty())
-            {
-              string err = (_("probe condition must not modify any variables"));
-              sess.print_error (SEMANTIC_ERROR (err, e->tok));
-            }
-          else if (vut.embedded_seen)
-            {
-              sess.print_error (SEMANTIC_ERROR (_("probe condition must not include impure embedded-C"), e->tok));
-            }
+          if (!vcv_cond.written.empty())
+            sess.print_error (SEMANTIC_ERROR (_("probe condition must not "
+                                                "modify any variables"),
+                                              e->tok));
+          else if (vcv_cond.embedded_seen)
+            sess.print_error (SEMANTIC_ERROR (_("probe condition must not "
+                                                "include impure embedded-C"),
+                                              e->tok));
 
-          // Add the condition expression to the front of the
-          // derived_probe body.
-          if_statement *ifs = new if_statement ();
-          ifs->tok = e->tok;
-          ifs->thenblock = new next_statement ();
-          ifs->thenblock->tok = e->tok;
-          ifs->elseblock = NULL;
-          unary_expression *notex = new unary_expression ();
-          notex->op = "!";
-          notex->tok = e->tok;
-          notex->operand = e;
-          ifs->condition = notex;
-          p->body = new block (ifs, p->body);
+          derived_probe_condition_inline(p);
+
+          vars_read_in_cond[p].insert(vcv_cond.read.begin(),
+                                      vcv_cond.read.end());
+        }
+
+      varuse_collecting_visitor vcv_body(sess);
+      p->body->visit (& vcv_body);
+
+      vars_written_in_body[p].insert(vcv_body.written.begin(),
+                                     vcv_body.written.end());
+    }
+
+  // do a second pass to collect affected probes
+  for (unsigned i = 0; i < sess.probes.size(); ++i)
+    {
+      derived_probe *p = sess.probes[i];
+
+      // for each variable this probe modifies...
+      set<vardecl*>::const_iterator var;
+      for (var  = vars_written_in_body[p].begin();
+           var != vars_written_in_body[p].end(); ++var)
+        {
+          // collect probes which could be affected
+          for (unsigned j = 0; j < sess.probes.size(); ++j)
+            {
+              if (vars_read_in_cond[sess.probes[j]].count(*var))
+                {
+                  if (!p->probes_with_affected_conditions.count(sess.probes[j]))
+                    {
+                      p->probes_with_affected_conditions.insert(sess.probes[j]);
+                      if (sess.verbose > 2)
+                        clog << "probe " << i << " can affect condition of "
+                                "probe " << j << endl;
+                    }
+                }
+            }
         }
     }
 
@@ -1519,6 +1549,15 @@ public:
 	  clog << _F("Turning on symbol data collecting, pragma:symbols found in %s",
 		    current_function->name.c_str()) << endl;
 	session.need_symbols = true;
+      }
+
+    if (! session.need_lines
+        && c->code.find("/* pragma:lines */") != string::npos)
+      {
+        if (session.verbose > 2)
+	  clog << _F("Turning on debug line data collecting, pragma:lines found in %s",
+		    current_function->name.c_str()) << endl;
+	session.need_lines = true;
       }
   }
 };
@@ -1587,6 +1626,36 @@ static int semantic_pass_stats (systemtap_session&);
 static int semantic_pass_conditions (systemtap_session&);
 
 
+struct expression_build_no_more_visitor : public expression_visitor
+{
+  // Clear extra details from every expression, like DWARF type info, so that
+  // builders can safely release them in build_no_more.  From here on out,
+  // we're back to basic types only.
+  void visit_expression(expression *e)
+    {
+      e->type_details.reset();
+    }
+};
+
+static void
+build_no_more (systemtap_session& s)
+{
+  expression_build_no_more_visitor v;
+
+  for (unsigned i=0; i<s.probes.size(); i++)
+    s.probes[i]->body->visit(&v);
+
+  for (map<string,functiondecl*>::iterator it = s.functions.begin();
+       it != s.functions.end(); it++)
+    it->second->body->visit(&v);
+
+  // Inform all derived_probe builders that we're done with
+  // all resolution, so it's time to release caches.
+  s.pattern_root->build_no_more (s);
+}
+
+
+
 // Link up symbols to their declarations.  Set the session's
 // files/probes/functions/globals vectors from the transitively
 // reached set of stapfiles in s.library_files, starting from
@@ -1607,12 +1676,12 @@ semantic_pass_symbols (systemtap_session& s)
       s.files.insert(s.files.end(), s.library_files.begin(),
                                     s.library_files.end());
     }
-  else if (s.user_file)
+  else if (!s.user_files.empty())
     {
-      // Normal run: seed s.files with user_file and let it grow through the
+      // Normal run: seed s.files with user_files and let it grow through the
       // find_* functions. NB: s.files can grow during this iteration, so
       // size() can return gradually increasing numbers.
-      s.files.push_back (s.user_file);
+      s.files.insert (s.files.end(), s.user_files.begin(), s.user_files.end());
     }
 
   for (unsigned i = 0; i < s.files.size(); i++)
@@ -1722,10 +1791,6 @@ semantic_pass_symbols (systemtap_session& s)
             }
         }
     }
-
-  // Inform all derived_probe builders that we're done with
-  // all resolution, so it's time to release caches.
-  s.pattern_root->build_no_more (s);
 
   if(s.systemtap_v_check){ 
     for(unsigned i=0;i<s.globals.size();i++){
@@ -1922,9 +1987,6 @@ semantic_pass (systemtap_session& s)
       if (rc == 0) rc = semantic_pass_vars (s);
       if (rc == 0) rc = semantic_pass_stats (s);
       if (rc == 0) embeddedcode_info_pass (s);
-
-      if (s.num_errors() == 0 && s.probes.size() == 0 && !s.dump_mode)
-        throw SEMANTIC_ERROR (_("no probes found"));
     }
   catch (const semantic_error& e)
     {
@@ -1932,12 +1994,25 @@ semantic_pass (systemtap_session& s)
       rc ++;
     }
 
+  bool no_primary_probes = true;
+  for (unsigned i = 0; i < s.probes.size(); i++)
+    if (s.is_primary_probe(s.probes[i]))
+      no_primary_probes = false;
+
+  if (s.num_errors() == 0 && no_primary_probes && !s.dump_mode)
+    {
+      s.print_error(SEMANTIC_ERROR(_("no probes found")));
+      rc ++;
+    }
+
+  build_no_more (s);
+
   // PR11443
   // NB: listing mode only cares whether we have any probes,
   // so all previous error conditions are disregarded.
   if (s.dump_mode == systemtap_session::dump_matched_probes ||
       s.dump_mode == systemtap_session::dump_matched_probes_vars)
-    rc = s.probes.empty();
+    rc = no_primary_probes;
 
   // If we're dumping functions, only error out if no functions were found
   if (s.dump_mode == systemtap_session::dump_functions)
@@ -1979,6 +2054,9 @@ symresolution_info::visit_foreach_loop (foreach_loop* e)
 {
   for (unsigned i=0; i<e->indexes.size(); i++)
     e->indexes[i]->visit (this);
+  for (unsigned i=0; i<e->array_slice.size(); i++)
+    if (e->array_slice[i])
+      e->array_slice[i]->visit(this);
 
   symbol *array = NULL;
   hist_op *hist = NULL;
@@ -1999,6 +2077,14 @@ symresolution_info::visit_foreach_loop (foreach_loop* e)
 	      throw SEMANTIC_ERROR (msg.str(), array->tok);
 	    }
 	}
+
+      if (!e->array_slice.empty() && e->array_slice.size() != e->indexes.size())
+        {
+          stringstream msg;
+          msg << _F("unresolved arity-%zu global array %s, missing global declaration?",
+                    e->array_slice.size(), array->name.c_str());
+          throw SEMANTIC_ERROR (msg.str(), array->tok);
+        }
     }
   else
     {
@@ -2028,8 +2114,9 @@ delete_statement_symresolution_info:
 
   void visit_arrayindex (arrayindex* e)
   {
-    parent->visit_arrayindex (e);
+    parent->visit_arrayindex(e, true);
   }
+
   void visit_functioncall (functioncall* e)
   {
     parent->visit_functioncall (e);
@@ -2087,8 +2174,23 @@ symresolution_info::visit_symbol (symbol* e)
 void
 symresolution_info::visit_arrayindex (arrayindex* e)
 {
+  visit_arrayindex(e, false);
+}
+
+void
+symresolution_info::visit_arrayindex (arrayindex* e, bool wildcard_ok)
+{
   for (unsigned i=0; i<e->indexes.size(); i++)
-    e->indexes[i]->visit (this);
+    {
+      // assuming that if NULL, it was originally a wildcard (*)
+      if (e->indexes[i] == NULL)
+        {
+          if (!wildcard_ok)
+            throw SEMANTIC_ERROR(_("wildcard not allowed in array index"), e->tok);
+        }
+      else
+        e->indexes[i]->visit (this);
+    }
 
   symbol *array = NULL;
   hist_op *hist = NULL;
@@ -2115,6 +2217,13 @@ symresolution_info::visit_arrayindex (arrayindex* e)
       assert (hist);
       hist->visit (this);
     }
+}
+
+
+void
+symresolution_info::visit_array_in (array_in* e)
+{
+  visit_arrayindex(e->operand, true);
 }
 
 
@@ -2307,10 +2416,9 @@ void semantic_pass_opt1 (systemtap_session& s, bool& relaxed_p)
   for (map<string,functiondecl*>::iterator it = s.functions.begin(); it != s.functions.end(); it++)
     {
       functiondecl* fd = it->second;
-      if (ftv.traversed.find(fd) == ftv.traversed.end())
+      if (ftv.seen.find(fd) == ftv.seen.end())
         {
-          if (! fd->synthetic && s.user_file &&
-              fd->tok->location.file->name == s.user_file->name) // !tapset
+          if (! fd->synthetic && s.is_user_file(fd->tok->location.file->name))
             s.print_warning (_F("Eliding unused function '%s'", fd->name.c_str()), fd->tok);
           // s.functions.erase (it); // NB: can't, since we're already iterating upon it
           new_unused_functions.push_back (fd);
@@ -2365,8 +2473,7 @@ void semantic_pass_opt2 (systemtap_session& s, bool& relaxed_p, unsigned iterati
         if (vut.read.find (l) == vut.read.end() &&
             vut.written.find (l) == vut.written.end())
           {
-            if (s.user_file &&
-                l->tok->location.file->name == s.user_file->name) // !tapset
+            if (s.is_user_file(l->tok->location.file->name))
               s.print_warning (_F("Eliding unused variable '%s'", l->name.c_str()), l->tok);
 	    if (s.tapset_compile_coverage) {
 	      s.probes[i]->unused_locals.push_back
@@ -2407,8 +2514,7 @@ void semantic_pass_opt2 (systemtap_session& s, bool& relaxed_p, unsigned iterati
           if (vut.read.find (l) == vut.read.end() &&
               vut.written.find (l) == vut.written.end())
             {
-              if (s.user_file &&
-                  l->tok->location.file->name == s.user_file->name) // !tapset
+              if (s.is_user_file(l->tok->location.file->name))
                 s.print_warning (_F("Eliding unused variable '%s'", l->name.c_str()), l->tok);
               if (s.tapset_compile_coverage) {
                 fd->unused_locals.push_back (fd->locals[j]);
@@ -2449,8 +2555,7 @@ void semantic_pass_opt2 (systemtap_session& s, bool& relaxed_p, unsigned iterati
       if (vut.read.find (l) == vut.read.end() &&
           vut.written.find (l) == vut.written.end())
         {
-          if (s.user_file &&
-              l->tok->location.file->name == s.user_file->name) // !tapset
+          if (s.is_user_file(l->tok->location.file->name)) 
             s.print_warning (_F("Eliding unused variable '%s'", l->name.c_str()), l->tok);
 	  if (s.tapset_compile_coverage) {
 	    s.unused_globals.push_back(s.globals[i]);
@@ -2499,16 +2604,64 @@ struct dead_assignment_remover: public update_visitor
 };
 
 
+// symbol_fetcher augmented to allow target-symbol types, but NULLed.
+struct assignment_symbol_fetcher
+  : public symbol_fetcher
+{
+  assignment_symbol_fetcher (symbol *&sym): symbol_fetcher(sym)
+  {}
+
+  void visit_target_symbol (target_symbol* e)
+  {
+    sym = NULL;
+  }
+
+  void visit_atvar_op (atvar_op *e)
+  {
+    sym = NULL;
+  }
+
+  void visit_cast_op (cast_op* e)
+  {
+    sym = NULL;
+  }
+
+  void visit_autocast_op (autocast_op* e)
+  {
+    sym = NULL;
+  }
+
+  void throwone (const token* t)
+  {
+    if (t->type == tok_operator && t->content == ".")
+      // guess someone misused . in $foo->bar.baz expression
+      // XXX why are we only checking this in lvalues?
+      throw SEMANTIC_ERROR (_("Expecting lvalue expression, try -> instead"), t);
+    else
+      throw SEMANTIC_ERROR (_("Expecting lvalue expression"), t);
+  }
+};
+
+symbol *
+get_assignment_symbol_within_expression (expression *e)
+{
+  symbol *sym = NULL;
+  assignment_symbol_fetcher fetcher(sym);
+  e->visit (&fetcher);
+  return sym; // NB: may be null!
+}
+
+
 void
 dead_assignment_remover::visit_assignment (assignment* e)
 {
   replace (e->left);
   replace (e->right);
 
-  symbol* left = get_symbol_within_expression (e->left);
-  vardecl* leftvar = left->referent; // NB: may be 0 for unresolved $target
-  if (leftvar) // not unresolved $target, so intended sideeffect may be elided
+  symbol* left = get_assignment_symbol_within_expression (e->left);
+  if (left) // not unresolved $target, so intended sideeffect may be elided
     {
+      vardecl* leftvar = left->referent;
       if (vut.read.find(leftvar) == vut.read.end()) // var never read?
         {
           // NB: Not so fast!  The left side could be an array whose
@@ -2539,8 +2692,7 @@ dead_assignment_remover::visit_assignment (assignment* e)
                 session.print_warning("eliding write-only ", *e->left->tok);
               else
               */
-              if (session.user_file &&
-                  e->left->tok->location.file->name == session.user_file->name) // !tapset
+              if (session.is_user_file(e->left->tok->location.file->name)) 
                 session.print_warning(_F("Eliding assignment to '%s'", leftvar->name.c_str()), e->tok);
               provide (e->right); // goodbye assignment*
               relaxed_p = false;
@@ -2815,8 +2967,7 @@ dead_stmtexpr_remover::visit_expr_statement (expr_statement *s)
         session.print_warning("eliding never-assigned ", *s->value->tok);
       else
       */
-      if (session.user_file &&
-          s->value->tok->location.file->name == session.user_file->name) // not tapset
+      if (session.is_user_file(s->value->tok->location.file->name))
         session.print_warning("Eliding side-effect-free expression ", s->tok);
 
       // NB: this 0 pointer is invalid to leave around for any length of
@@ -2937,6 +3088,7 @@ struct void_statement_reducer: public update_visitor
   void visit_target_symbol (target_symbol* e);
   void visit_atvar_op (atvar_op* e);
   void visit_cast_op (cast_op* e);
+  void visit_autocast_op (autocast_op* e);
   void visit_defined_op (defined_op* e);
 
   // these are a bit hairy to grok due to the intricacies of indexables and
@@ -2952,6 +3104,9 @@ struct void_statement_reducer: public update_visitor
   void visit_pre_crement (pre_crement* e) { provide (e); }
   void visit_post_crement (post_crement* e) { provide (e); }
   void visit_assignment (assignment* e) { provide (e); }
+
+private:
+  void reduce_target_symbol (target_symbol* e, expression* operand=NULL);
 };
 
 
@@ -3166,7 +3321,7 @@ void_statement_reducer::visit_functioncall (functioncall* e)
     }
 
   varuse_collecting_visitor vut(session);
-  vut.traversed.insert (e->referent);
+  vut.seen.insert (e->referent);
   vut.current_function = e->referent;
   e->referent->body->visit (& vut);
   if (!vut.side_effect_free_wrt (focal_vars))
@@ -3228,19 +3383,22 @@ void_statement_reducer::visit_print_format (print_format* e)
 }
 
 void
-void_statement_reducer::visit_atvar_op (atvar_op* e)
+void_statement_reducer::reduce_target_symbol (target_symbol* e,
+                                              expression* operand)
 {
-  visit_target_symbol (e);
-}
-
-void
-void_statement_reducer::visit_target_symbol (target_symbol* e)
-{
-  // When target_symbol isn't needed, it's just as good to
-  // evaluate any array indexes directly
+  // When the result of any target_symbol isn't needed, it's just as good to
+  // evaluate the operand and any array indexes directly
 
   block *b = new block;
   b->tok = e->tok;
+
+  if (operand)
+    {
+      expr_statement *es = new expr_statement;
+      es->value = operand;
+      es->tok = es->value->tok;
+      b->statements.push_back(es);
+    }
 
   for (unsigned i=0; i<e->components.size(); i++ )
     {
@@ -3253,16 +3411,6 @@ void_statement_reducer::visit_target_symbol (target_symbol* e)
       b->statements.push_back(es);
     }
 
-  if (b->statements.empty())
-    {
-      delete b;
-      provide (e);
-      return;
-    }
-
-  if (session.verbose>2)
-    clog << _("Eliding unused target symbol ") << *e->tok << endl;
-
   b->visit(this);
   relaxed_p = false;
   e = 0;
@@ -3270,37 +3418,35 @@ void_statement_reducer::visit_target_symbol (target_symbol* e)
 }
 
 void
+void_statement_reducer::visit_atvar_op (atvar_op* e)
+{
+  if (session.verbose>2)
+    clog << _("Eliding unused target symbol ") << *e->tok << endl;
+  reduce_target_symbol (e);
+}
+
+void
+void_statement_reducer::visit_target_symbol (target_symbol* e)
+{
+  if (session.verbose>2)
+    clog << _("Eliding unused target symbol ") << *e->tok << endl;
+  reduce_target_symbol (e);
+}
+
+void
 void_statement_reducer::visit_cast_op (cast_op* e)
 {
-  // When the result of a cast operation isn't needed, it's just as good to
-  // evaluate the operand and any array indexes directly
-
-  block *b = new block;
-  b->tok = e->tok;
-
-  expr_statement *es = new expr_statement;
-  es->value = e->operand;
-  es->tok = es->value->tok;
-  b->statements.push_back(es);
-
-  for (unsigned i=0; i<e->components.size(); i++ )
-    {
-      if (e->components[i].type != target_symbol::comp_expression_array_index)
-        continue;
-
-      es = new expr_statement;
-      es->value = e->components[i].expr_index;
-      es->tok = es->value->tok;
-      b->statements.push_back(es);
-    }
-
   if (session.verbose>2)
     clog << _("Eliding unused typecast ") << *e->tok << endl;
+  reduce_target_symbol (e, e->operand);
+}
 
-  b->visit(this);
-  relaxed_p = false;
-  e = 0;
-  provide (e);
+void
+void_statement_reducer::visit_autocast_op (autocast_op* e)
+{
+  if (session.verbose>2)
+    clog << _("Eliding unused autocast ") << *e->tok << endl;
+  reduce_target_symbol (e, e->operand);
 }
 
 
@@ -3904,6 +4050,8 @@ struct dead_control_remover: public traversing_visitor
 void dead_control_remover::visit_block (block* b)
 {
   vector<statement*>& vs = b->statements;
+  if (vs.size() == 0) /* else (size_t) size()-1 => very big */
+    return;
   for (size_t i = 0; i < vs.size() - 1; ++i)
     {
       vs[i]->visit (this);
@@ -4128,6 +4276,88 @@ semantic_pass_optimize2 (systemtap_session& s)
 // ------------------------------------------------------------------------
 // type resolution
 
+struct autocast_expanding_visitor: public var_expanding_visitor
+{
+  typeresolution_info& ti;
+  autocast_expanding_visitor (typeresolution_info& ti): ti(ti) {}
+
+  void resolve_functioncall (functioncall* fc)
+    {
+      // This is a very limited version of semantic_pass_symbols, but we're
+      // late in the game at this point.  We won't get a chance to optimize,
+      // but for now the only functions we expect are kernel/user_string from
+      // pretty-printing, which don't need optimization.
+
+      systemtap_session& s = ti.session;
+      size_t nfiles = s.files.size();
+
+      symresolution_info sym (s);
+      sym.current_function = ti.current_function;
+      sym.current_probe = ti.current_probe;
+      fc->visit (&sym);
+
+      // NB: synthetic functions get tacked onto the origin file, so we won't
+      // see them growing s.files[].  Traverse it directly.
+      if (fc->referent)
+        {
+          functiondecl* fd = fc->referent;
+          sym.current_function = fd;
+          sym.current_probe = 0;
+          fd->body->visit (&sym);
+        }
+
+      while (nfiles < s.files.size())
+        {
+          stapfile* dome = s.files[nfiles++];
+          for (size_t i = 0; i < dome->functions.size(); ++i)
+            {
+              functiondecl* fd = dome->functions[i];
+              sym.current_function = fd;
+              sym.current_probe = 0;
+              fd->body->visit (&sym);
+              // NB: not adding to s.functions just yet...
+            }
+        }
+
+      // Add only the direct functions we need.
+      functioncall_traversing_visitor ftv;
+      fc->visit (&ftv);
+      for (set<functiondecl*>::iterator it = ftv.seen.begin();
+           it != ftv.seen.end(); ++it)
+        {
+          functiondecl* fd = *it;
+          pair<map<string,functiondecl*>::iterator,bool> inserted =
+            s.functions.insert (make_pair (fd->name, fd));
+          if (!inserted.second && inserted.first->second != fd)
+            throw SEMANTIC_ERROR
+              (_F("resolved function '%s' conflicts with an existing function",
+                  fd->name.c_str()), fc->tok);
+        }
+    }
+
+  void visit_autocast_op (autocast_op* e)
+    {
+      const bool lvalue = is_active_lvalue (e);
+      const exp_type_ptr& details = e->operand->type_details;
+      if (details && !e->saved_conversion_error)
+        {
+          functioncall* fc = details->expand (e, lvalue);
+          if (fc)
+            {
+              ti.num_newly_resolved++;
+
+              resolve_functioncall (fc);
+
+              if (lvalue)
+                provide_lvalue_call (fc);
+
+              fc->visit (this);
+              return;
+            }
+        }
+      var_expanding_visitor::visit_autocast_op (e);
+    }
+};
 
 static int
 semantic_pass_types (systemtap_session& s)
@@ -4138,6 +4368,15 @@ semantic_pass_types (systemtap_session& s)
   unsigned iterations = 0;
   typeresolution_info ti (s);
 
+  // Globals never have detailed types.
+  // If we null them now, then all remaining vardecls can be detailed.
+  for (unsigned j=0; j<s.globals.size(); j++)
+    {
+      vardecl* gd = s.globals[j];
+      if (!gd->type_details)
+        gd->type_details = ti.null_type;
+    }
+
   ti.assert_resolvability = false;
   // XXX: maybe convert to exception-based error signalling
   while (1)
@@ -4147,6 +4386,7 @@ semantic_pass_types (systemtap_session& s)
       iterations ++;
       ti.num_newly_resolved = 0;
       ti.num_still_unresolved = 0;
+      ti.num_available_autocasts = 0;
 
       for (map<string,functiondecl*>::iterator it = s.functions.begin();
                                                it != s.functions.end(); it++)
@@ -4166,6 +4406,14 @@ semantic_pass_types (systemtap_session& s)
           //   ti.unresolved (fd->tok);
           for (unsigned i=0; i < fd->locals.size(); ++i)
             ti.check_local (fd->locals[i]);
+
+          // Check and run the autocast expanding visitor.
+          if (ti.num_available_autocasts > 0)
+            {
+              autocast_expanding_visitor aev (ti);
+              aev.replace (fd->body);
+              ti.num_available_autocasts = 0;
+            }
         }
 
       for (unsigned j=0; j<s.probes.size(); j++)
@@ -4179,6 +4427,14 @@ semantic_pass_types (systemtap_session& s)
           pn->body->visit (& ti);
           for (unsigned i=0; i < pn->locals.size(); ++i)
             ti.check_local (pn->locals[i]);
+
+          // Check and run the autocast expanding visitor.
+          if (ti.num_available_autocasts > 0)
+            {
+              autocast_expanding_visitor aev (ti);
+              aev.replace (pn->body);
+              ti.num_available_autocasts = 0;
+            }
 
           probe_point* pp = pn->sole_location();
           if (pp->condition)
@@ -4225,11 +4481,18 @@ semantic_pass_types (systemtap_session& s)
 }
 
 
+struct exp_type_null : public exp_type_details
+{
+  uintptr_t id () const { return 0; }
+  bool expandable() const { return false; }
+  functioncall *expand(autocast_op*, bool) { return NULL; }
+};
 
 typeresolution_info::typeresolution_info (systemtap_session& s):
   session(s), num_newly_resolved(0), num_still_unresolved(0),
   assert_resolvability(false), mismatch_complexity(0),
-  current_function(0), current_probe(0), t(pe_unknown)
+  current_function(0), current_probe(0), t(pe_unknown),
+  null_type(new exp_type_null())
 {
 }
 
@@ -4426,6 +4689,21 @@ typeresolution_info::visit_assignment (assignment *e)
           e->left->type != e->right->type)
         mismatch (e);
 
+      // Propagate type details from the RHS to the assignment
+      if (e->type == e->right->type &&
+          e->right->type_details && !e->type_details)
+        resolved_details(e->right->type_details, e->type_details);
+
+      // Propagate type details from the assignment to the LHS
+      if (e->type == e->left->type && e->type_details)
+        {
+          if (e->left->type_details &&
+              *e->left->type_details != *e->type_details &&
+              *e->left->type_details != *null_type)
+            resolved_details(null_type, e->left->type_details);
+          else if (!e->left->type_details)
+            resolved_details(e->type_details, e->left->type_details);
+        }
     }
   else
     throw SEMANTIC_ERROR (_("unsupported assignment operator ") + e->op);
@@ -4538,6 +4816,13 @@ typeresolution_info::visit_ternary_expression (ternary_expression* e)
     }
   else if (e->type != sub_type)
     mismatch (e->tok, sub_type, e->type);
+
+  // Propagate type details from both true/false branches
+  if (!e->type_details &&
+      e->type == e->truevalue->type && e->type == e->falsevalue->type &&
+      e->truevalue->type_details && e->falsevalue->type_details &&
+      *e->truevalue->type_details == *e->falsevalue->type_details)
+    resolved_details(e->truevalue->type_details, e->type_details);
 }
 
 
@@ -4588,8 +4873,27 @@ void resolve_2types (Referrer* referrer, Referent* referent,
 void
 typeresolution_info::visit_symbol (symbol* e)
 {
-  assert (e->referent != 0);
+  if (e->referent == 0)
+    throw SEMANTIC_ERROR (_F("internal error: unresolved symbol '%s'",
+                             e->name.c_str()), e->tok);
+
   resolve_2types (e, e->referent, this, t);
+
+  if (e->type == e->referent->type)
+    {
+      // If both have type details, then they either must agree;
+      // otherwise force them both to null.
+      if (e->type_details && e->referent->type_details &&
+          *e->type_details != *e->referent->type_details)
+        {
+          resolved_details(null_type, e->type_details);
+          resolved_details(null_type, e->referent->type_details);
+        }
+      else if (e->type_details && !e->referent->type_details)
+        resolved_details(e->type_details, e->referent->type_details);
+      else if (!e->type_details && e->referent->type_details)
+        resolved_details(e->referent->type_details, e->type_details);
+    }
 }
 
 
@@ -4693,6 +4997,26 @@ typeresolution_info::visit_cast_op (cast_op* e)
 
 
 void
+typeresolution_info::visit_autocast_op (autocast_op* e)
+{
+  // Like cast_op, a implicit autocast_op shouldn't survive this far
+  // unless it was not resolved and its value is really needed.
+  if (assert_resolvability && e->saved_conversion_error)
+    throw (* (e->saved_conversion_error));
+  else if (assert_resolvability)
+    throw SEMANTIC_ERROR(_("unknown type in dereference"), e->tok);
+
+  t = pe_long;
+  e->operand->visit (this);
+
+  num_still_unresolved++;
+  if (e->operand->type_details &&
+      e->operand->type_details->expandable())
+    num_available_autocasts++;
+}
+
+
+void
 typeresolution_info::visit_perf_op (perf_op* e)
 {
   // A perf_op should already be resolved
@@ -4754,26 +5078,29 @@ typeresolution_info::visit_arrayindex (arrayindex* e)
     unresolved (e->tok); // symbol resolution should prevent this
   else for (unsigned i=0; i<e->indexes.size(); i++)
     {
-      expression* ee = e->indexes[i];
-      exp_type& ft = array->referent->index_types [i];
-      t = ft;
-      ee->visit (this);
-      exp_type at = ee->type;
-
-      if ((at == pe_string || at == pe_long) && ft == pe_unknown)
+      if (e->indexes[i])
         {
-          // propagate to formal type
-          ft = at;
-          resolved (ee->tok, ft, array->referent, i);
+          expression* ee = e->indexes[i];
+          exp_type& ft = array->referent->index_types [i];
+          t = ft;
+          ee->visit (this);
+          exp_type at = ee->type;
+
+          if ((at == pe_string || at == pe_long) && ft == pe_unknown)
+            {
+              // propagate to formal type
+              ft = at;
+              resolved (ee->tok, ft, array->referent, i);
+            }
+          if (at == pe_stats)
+            invalid (ee->tok, at);
+          if (ft == pe_stats)
+            invalid (ee->tok, ft);
+          if (at != pe_unknown && ft != pe_unknown && ft != at)
+            mismatch (ee->tok, ee->type, array->referent, i);
+          if (at == pe_unknown)
+              unresolved (ee->tok);
         }
-      if (at == pe_stats)
-        invalid (ee->tok, at);
-      if (ft == pe_stats)
-        invalid (ee->tok, ft);
-      if (at != pe_unknown && ft != pe_unknown && ft != at)
-        mismatch (ee->tok, ee->type, array->referent, i);
-      if (at == pe_unknown)
-	  unresolved (ee->tok);
     }
 }
 
@@ -4781,12 +5108,19 @@ typeresolution_info::visit_arrayindex (arrayindex* e)
 void
 typeresolution_info::visit_functioncall (functioncall* e)
 {
-  assert (e->referent != 0);
+  if (e->referent == 0)
+    throw SEMANTIC_ERROR (_F("internal error: unresolved function call to '%s'",
+                             e->function.c_str()), e->tok);
 
   resolve_2types (e, e->referent, this, t, true); // accept unknown type
 
   if (e->type == pe_stats)
     invalid (e->tok, e->type);
+
+  const exp_type_ptr& func_type = e->referent->type_details;
+  if (func_type && e->referent->type == e->type
+      && (!e->type_details || *func_type != *e->type_details))
+    resolved_details(e->referent->type_details, e->type_details);
 
   // now resolve the function parameters
   if (e->args.size() != e->referent->formal_args.size())
@@ -4807,13 +5141,13 @@ typeresolution_info::visit_functioncall (functioncall* e)
           resolved (ee->tok, ft, e->referent->formal_args[i], i);
         }
       if (at == pe_stats)
-        invalid (e->tok, at);
+        invalid (ee->tok, at);
       if (ft == pe_stats)
         invalid (fe_tok, ft);
       if (at != pe_unknown && ft != pe_unknown && ft != at)
         mismatch (ee->tok, ee->type, e->referent->formal_args[i], i);
       if (at == pe_unknown)
-        unresolved (e->tok);
+        unresolved (ee->tok);
     }
 }
 
@@ -4823,15 +5157,8 @@ typeresolution_info::visit_block (block* e)
 {
   for (unsigned i=0; i<e->statements.size(); i++)
     {
-      try
-	{
-	  t = pe_unknown;
-	  e->statements[i]->visit (this);
-	}
-      catch (const semantic_error& e)
-	{
-	  session.print_error (e);
-        }
+      t = pe_unknown;
+      e->statements[i]->visit (this);
     }
 }
 
@@ -4947,29 +5274,56 @@ typeresolution_info::visit_foreach_loop (foreach_loop* e)
       assert (array);
       if (e->indexes.size() != array->referent->index_types.size())
 	unresolved (e->tok); // symbol resolution should prevent this
-      else for (unsigned i=0; i<e->indexes.size(); i++)
-	{
-	  expression* ee = e->indexes[i];
-	  exp_type& ft = array->referent->index_types [i];
-	  t = ft;
-	  ee->visit (this);
-	  exp_type at = ee->type;
+      else
+        {
+          for (unsigned i=0; i<e->indexes.size(); i++)
+            {
+              expression* ee = e->indexes[i];
+              exp_type& ft = array->referent->index_types [i];
+              t = ft;
+              ee->visit (this);
+              exp_type at = ee->type;
 
-	  if ((at == pe_string || at == pe_long) && ft == pe_unknown)
-	    {
-	      // propagate to formal type
-	      ft = at;
-	      resolved (ee->tok, ee->type, array->referent, i);
-	    }
-	  if (at == pe_stats)
-	    invalid (ee->tok, at);
-	  if (ft == pe_stats)
-	    invalid (ee->tok, ft);
-	  if (at != pe_unknown && ft != pe_unknown && ft != at)
-	    mismatch (ee->tok, ee->type, array->referent, i);
-	  if (at == pe_unknown)
-	    unresolved (ee->tok);
-	}
+              if ((at == pe_string || at == pe_long) && ft == pe_unknown)
+                {
+                  // propagate to formal type
+                  ft = at;
+                  resolved (ee->tok, ee->type, array->referent, i);
+                }
+              if (at == pe_stats)
+                invalid (ee->tok, at);
+              if (ft == pe_stats)
+                invalid (ee->tok, ft);
+              if (at != pe_unknown && ft != pe_unknown && ft != at)
+                mismatch (ee->tok, ee->type, array->referent, i);
+              if (at == pe_unknown)
+                unresolved (ee->tok);
+            }
+          for (unsigned i=0; i<e->array_slice.size(); i++)
+            if (e->array_slice[i])
+              {
+                expression* ee = e->array_slice[i];
+                exp_type& ft = array->referent->index_types [i];
+                t = ft;
+                ee->visit (this);
+                exp_type at = ee->type;
+
+                if ((at == pe_string || at == pe_long) && ft == pe_unknown)
+                  {
+                    // propagate to formal type
+                    ft = at;
+                    resolved (ee->tok, ee->type, array->referent, i);
+                  }
+                if (at == pe_stats)
+                  invalid (ee->tok, at);
+                if (ft == pe_stats)
+                  invalid (ee->tok, ft);
+                if (at != pe_unknown && ft != pe_unknown && ft != at)
+                  mismatch (ee->tok, ee->type, array->referent, i);
+                if (at == pe_unknown)
+                  unresolved (ee->tok);
+              }
+        }
       t = pe_unknown;
       array->visit (this);
       wanted_value = array->type;
@@ -5114,6 +5468,18 @@ typeresolution_info::visit_return_statement (return_statement* e)
     }
   if (e->value->type == pe_stats)
     invalid (e->value->tok, e->value->type);
+
+  const exp_type_ptr& value_type = e->value->type_details;
+  if (value_type && current_function->type == e->value->type)
+    {
+      exp_type_ptr& func_type = current_function->type_details;
+      if (!func_type)
+        // The function can take on the type details of the return value.
+        resolved_details(value_type, func_type);
+      else if (*func_type != *value_type && *func_type != *null_type)
+        // Conflicting return types?  NO TYPE FOR YOU!
+        resolved_details(null_type, func_type);
+    }
 }
 
 void
@@ -5478,6 +5844,14 @@ typeresolution_info::resolved (const token *tok, exp_type type,
       resolved_type res(tok, decl, index);
       resolved_types.push_back(res);
     }
+}
+
+void
+typeresolution_info::resolved_details (const exp_type_ptr& src,
+                                       exp_type_ptr& dest)
+{
+  num_newly_resolved ++;
+  dest = src;
 }
 
 /* vim: set sw=2 ts=8 cino=>4,n-2,{2,^-2,t0,(0,u0,w1,M1 : */

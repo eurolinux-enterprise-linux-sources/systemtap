@@ -52,7 +52,7 @@ struct token
   friend class parser;
   friend class lexer;
 private:
-  token() {}
+  token(): chain(0) {}
   token(const token& other):
     location(other.location), type(other.type), content(other.content),
     msg(other.msg), chain(other.chain) {}
@@ -81,10 +81,18 @@ struct macrodecl {
 };
 
 
-stapfile* parse (systemtap_session& s, std::istream& i, bool privileged, bool errs_as_warnings);
-stapfile* parse (systemtap_session& s, const std::string& n, bool privileged, bool errs_as_warnings);
+enum parse_flag
+  {
+    pf_guru = 1,
+    pf_no_compatible = 2,
+    pf_squash_errors = 4,
+  };
 
-stapfile* parse_library_macros (systemtap_session& s, const std::string& n, bool errs_as_warnings);
+
+stapfile* parse (systemtap_session& s,const std::string& n, std::istream& i, unsigned flags);
+stapfile* parse (systemtap_session& s, const std::string& n, unsigned flags);
+
+stapfile* parse_library_macros (systemtap_session& s, const std::string& n);
 
 probe* parse_synthetic_probe (systemtap_session &s, std::istream& i, const token* tok);
 

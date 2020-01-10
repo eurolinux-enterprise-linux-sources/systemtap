@@ -34,6 +34,12 @@ probe nd_syscall.getresuid16.return = kprobe.function("sys32_getresuid16").retur
 	retstr = returnstr(1)
 }
 
+%( systemtap_v < "2.7" %?
+# sys32_ipc() is just a syscall multiplexer (similar to
+# sys_socketcall()). So, we don't really need to probe it, since we'll
+# be probing what sys32_ipc() will call (semget, msgsnd, msgrcv,
+# shmat, etc.).
+
 # ipc _________________________________________________
 # long sys32_ipc(u32 call, int first, int second, int third, u32 ptr)
 #
@@ -44,11 +50,12 @@ probe nd_syscall.ipc = kprobe.function("sys32_ipc") ?
 	asmlinkage()
 	argstr = sprintf("%d, %d, %d, %d, %p", uint_arg(1), int_arg(2), int_arg(3), int_arg(4), uint_arg(5))
 }
-probe nd_syscall.ipc.return = kprobe.function("sys_ipc").return ?
+probe nd_syscall.ipc.return = kprobe.function("sys32_ipc").return ?
 {
 	name = "ipc"
 	retstr = returnstr(1)
 }
+%)
 
 # In kernels < 2.6.33, mmap()/mmap2() was handled by arch-specific
 # code.  In kernels >= 2.6.33, the arch-specific code just calls
@@ -182,57 +189,66 @@ function get_32mmap_args:string (args:long)
 		u32     flags;
 		u32     fd;
 		u32     offset;
-	}a;
+	} a;
 
-	char proto[60];
-	char flags[160];
-
-	if(_stp_copy_from_user((char *)&a, (char *)STAP_ARG_args, sizeof(a))== 0){
-		/* _mprotect_prot_str */
-		proto[0] = '\0';
-		if(a.prot){
-                        if(a.prot & 1)
-                                strlcat (proto, "PROT_READ|", sizeof(proto));
-                        if(a.prot & 2)
-                                strlcat (proto, "PROT_WRITE|", sizeof(proto));
-                        if(a.prot & 4)
-                                strlcat (proto, "PROT_EXEC|", sizeof(proto));
-		} else {
-                        strlcat (proto, "PROT_NONE", sizeof(proto));
-		}
-		if (proto[0] != '\0') proto[strlen(proto)-1] = '\0';
-
-		/* _mmap_flags */
-		flags[0]='\0';
-                if (a.flags & 1) strlcat (flags, "MAP_SHARED|", sizeof(flags));
-                if (a.flags & 2)
-                        strlcat (flags, "MAP_PRIVATE|", sizeof(flags));
-                if (a.flags & 0x10)
-                        strlcat (flags, "MAP_FIXED|", sizeof(flags));
-                if (a.flags & 0x20)
-                        strlcat (flags, "MAP_ANONYMOUS|", sizeof(flags));
-                if (a.flags & 0x100)
-                        strlcat (flags, "MAP_GROWSDOWN|", sizeof(flags));
-                if (a.flags & 0x800)
-                        strlcat (flags, "MAP_DENYWRITE|", sizeof(flags));
-                if (a.flags & 0x1000)
-                        strlcat (flags, "MAP_EXECUTABLE|", sizeof(flags));
-                if (a.flags & 0x2000)
-                        strlcat (flags, "MAP_LOCKED|", sizeof(flags));
-                if (a.flags & 0x4000)
-                        strlcat (flags, "MAP_NORESERVE|", sizeof(flags));
-                if (a.flags & 0x8000)
-                        strlcat (flags, "MAP_POPULATE|", sizeof(flags));
-                if (a.flags & 0x10000)
-                        strlcat (flags, "MAP_NONBLOCK|", sizeof(flags));
-                if (flags[0] != '\0') flags[strlen(flags)-1] = '\0';
-
-                snprintf (STAP_RETVALUE, MAXSTRINGLEN,
-                          "0x%x, %d, %s, %s, %d, %d", a.addr, a.len,
-                          proto, flags, a.fd, a.offset);
-	}else{
+	if (_stp_copy_from_user((char *)&a, (char *)STAP_ARG_args,
+				sizeof(a)) == 0) {
+		int len;
+		_stp_snprintf(STAP_RETVALUE, MAXSTRINGLEN, "0x%x, %u, ",
+			      a.addr, a.len);
+		_stp_lookup_or_str(_stp_mprotect_list, a.prot, STAP_RETVALUE,
+				   MAXSTRINGLEN);
+		strlcat (STAP_RETVALUE, ", ", MAXSTRINGLEN);
+		_stp_lookup_or_str(_stp_mmap_list, a.flags, STAP_RETVALUE,
+				   MAXSTRINGLEN);
+		strlcat (STAP_RETVALUE, ", ", MAXSTRINGLEN);
+		len = strlen(STAP_RETVALUE);
+		_stp_snprintf(STAP_RETVALUE + len, MAXSTRINGLEN - len,
+			      "%d, %d", a.fd, a.offset);
+	} else {
 		strlcpy (STAP_RETVALUE, "UNKNOWN", MAXSTRINGLEN);
 	}
 %}
+
+# ftruncate64 _________________________________________________
+#
+# COMPAT_SYSCALL_DEFINE3(s390_ftruncate64, unsigned int, fd, u32, high,
+#			 u32, low)
+#
+probe nd_syscall.compat_ftruncate64 = kprobe.function("sys32_ftruncate64") ?
+{
+	asmlinkage()
+        name = "ftruncate"
+        fd = int_arg(1)
+        length = ((uint_arg(2) << 32) | uint_arg(3))
+        argstr = sprintf("%d, %d", fd, length)
+}
+probe nd_syscall.compat_ftruncate64.return =
+	kprobe.function("sys32_ftruncate64").return ?
+{
+	name = "ftruncate"
+	retstr = returnstr(1)
+}
+
+# truncate64 __________________________________________________
+#
+# COMPAT_SYSCALL_DEFINE3(s390_truncate64, const char __user *, path,
+#			 u32, high, u32, low)
+#
+probe nd_syscall.compat_truncate64 = kprobe.function("sys32_truncate64") ?
+{
+	asmlinkage()
+        name = "truncate"
+	path_uaddr = pointer_arg(1)
+	path = user_string_quoted(path_uaddr)
+        length = ((uint_arg(2) << 32) | uint_arg(3))
+	argstr = sprintf("%s, %d", user_string_quoted(path_uaddr), length)
+}
+probe nd_syscall.compat_truncate64.return =
+	kprobe.function("sys32_truncate64").return ?
+{
+	name = "truncate"
+	retstr = returnstr(1)
+}
 
 %)

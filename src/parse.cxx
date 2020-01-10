@@ -41,11 +41,13 @@ public:
   bool ate_comment; // current token follows a comment
   bool ate_whitespace; // the most recent token followed whitespace
   bool saw_tokens; // the lexer found tokens (before preprocessing occurred)
+  bool check_compatible; // whether to gate features on session.compatible
 
   token* scan ();
   lexer (istream&, const string&, systemtap_session&);
   void set_current_file (stapfile* f);
   void set_current_token_chain (const token* tok);
+  inline bool has_version (const char* v) const;
 
   static set<string> keywords;
   static set<string> atwords;
@@ -71,12 +73,12 @@ private:
 class parser
 {
 public:
-  parser (systemtap_session& s, const string& n, istream& i, bool p);
+  parser (systemtap_session& s, const string& n, istream& i, unsigned flags=0);
   ~parser ();
 
-  stapfile* parse (bool errs_as_warnings);
-  probe* parse_synthetic_probe (const token* chain, bool errs_as_warnings);
-  stapfile* parse_library_macros (bool errs_as_warnings);
+  stapfile* parse ();
+  probe* parse_synthetic_probe (const token* chain);
+  stapfile* parse_library_macros ();
 
 private:
   typedef enum {
@@ -98,6 +100,7 @@ private:
   systemtap_session& session;
   string input_name;
   lexer input;
+  bool errs_as_warnings;
   bool privileged;
   parse_context context;
 
@@ -183,7 +186,9 @@ private: // nonterminals
   continue_statement* parse_continue_statement ();
   indexable* parse_indexable ();
   const token *parse_hist_op_or_bare_name (hist_op *&hop, string &name);
-  target_symbol *parse_target_symbol (const token* t);
+  target_symbol *parse_target_symbol ();
+  cast_op *parse_cast_op ();
+  atvar_op *parse_atvar_op ();
   expression* parse_entry_op (const token* t);
   expression* parse_defined_op (const token* t);
   expression* parse_perf_op (const token* t);
@@ -203,9 +208,11 @@ private: // nonterminals
   expression* parse_multiplicative ();
   expression* parse_unary ();
   expression* parse_crement ();
+  expression* parse_dwarf_value ();
   expression* parse_value ();
   expression* parse_symbol ();
 
+  bool peek_target_symbol_components ();
   void parse_target_symbol_components (target_symbol* e);
 };
 
@@ -213,15 +220,14 @@ private: // nonterminals
 // ------------------------------------------------------------------------
 
 stapfile*
-parse (systemtap_session& s, istream& i, bool pr, bool errs_as_warnings)
+parse (systemtap_session& s, const string& n, istream& i, unsigned flags)
 {
-  parser p (s, "<input>", i, pr);
-  return p.parse (errs_as_warnings);
+  parser p (s, n, i, flags);
+  return p.parse ();
 }
 
-
 stapfile*
-parse (systemtap_session& s, const string& name, bool pr, bool errs_as_warnings)
+parse (systemtap_session& s, const string& name, unsigned flags)
 {
   ifstream i(name.c_str(), ios::in);
   if (i.fail())
@@ -233,12 +239,12 @@ parse (systemtap_session& s, const string& name, bool pr, bool errs_as_warnings)
       return 0;
     }
 
-  parser p (s, name, i, pr);
-  return p.parse (errs_as_warnings);
+  parser p (s, name, i, flags);
+  return p.parse ();
 }
 
 stapfile*
-parse_library_macros (systemtap_session& s, const string& name, bool errs_as_warnings)
+parse_library_macros (systemtap_session& s, const string& name)
 {
   ifstream i(name.c_str(), ios::in);
   if (i.fail())
@@ -250,24 +256,26 @@ parse_library_macros (systemtap_session& s, const string& name, bool errs_as_war
       return 0;
     }
 
-  parser p (s, name, i, false); // TODOXX pr is ...? should path be full??
-  return p.parse_library_macros (errs_as_warnings);
+  parser p (s, name, i);
+  return p.parse_library_macros ();
 }
 
 probe*
 parse_synthetic_probe (systemtap_session &s, std::istream& i, const token* tok)
 {
-  parser p (s, "<synthetic>", i, false);
-  return p.parse_synthetic_probe (tok, false);
+  parser p (s, "<synthetic>", i);
+  return p.parse_synthetic_probe (tok);
 }
 
 // ------------------------------------------------------------------------
 
 
-parser::parser (systemtap_session& s, const string &n, istream& i, bool p):
-  session (s), input_name (n), input (i, input_name, s), privileged (p),
+parser::parser (systemtap_session& s, const string &n, istream& i, unsigned flags):
+  session (s), input_name (n), input (i, input_name, s),
+  errs_as_warnings(flags & pf_squash_errors), privileged (flags & pf_guru),
   context(con_unknown), systemtap_v_seen(0), last_t (0), next_t (0), num_errors (0)
 {
+  input.check_compatible = !(flags & pf_no_compatible);
 }
 
 parser::~parser()
@@ -703,7 +711,7 @@ parser::slurp_pp1_body (vector<const token*>& body)
 
 // Used for parsing .stpm files.
 stapfile*
-parser::parse_library_macros (bool errs_as_warnings)
+parser::parse_library_macros ()
 {
   stapfile* f = new stapfile;
   input.set_current_file (f);
@@ -1338,7 +1346,7 @@ parser::peek_kw (std::string const & kw)
 
 
 lexer::lexer (istream& input, const string& in, systemtap_session& s):
-  ate_comment(false), ate_whitespace(false), saw_tokens(false),
+  ate_comment(false), ate_whitespace(false), saw_tokens(false), check_compatible(true),
   input_name (in), input_pointer (0), input_end (0), cursor_suspend_count(0),
   cursor_suspend_line (1), cursor_suspend_column (1), cursor_line (1),
   cursor_column (1), session(s), current_file (0), current_token_chain (0)
@@ -1422,6 +1430,15 @@ lexer::input_peek (unsigned n)
   if (input_pointer + n >= input_end)
     return -1; // EOF
   return (unsigned char)*(input_pointer + n);
+}
+
+
+bool
+lexer::has_version (const char* v) const
+{
+  return check_compatible
+    ? strverscmp(session.compatible.c_str(), v) >= 0
+    : true;
 }
 
 
@@ -1621,7 +1638,7 @@ skip:
 	      switch (c)
 		{
                 case 'x':
-                  if (strverscmp(session.compatible.c_str(), "2.3") < 0)
+                  if (!has_version("2.3"))
                     goto the_default;
 		case 'a':
 		case 'b':
@@ -1786,7 +1803,7 @@ token::make_junk (const string new_msg)
 // ------------------------------------------------------------------------
 
 stapfile*
-parser::parse (bool errs_as_warnings)
+parser::parse ()
 {
   stapfile* f = new stapfile;
   input.set_current_file (f);
@@ -1881,7 +1898,7 @@ parser::parse (bool errs_as_warnings)
 
 
 probe*
-parser::parse_synthetic_probe (const token* chain, bool errs_as_warnings)
+parser::parse_synthetic_probe (const token* chain)
 {
   probe* p = NULL;
   stapfile* f = new stapfile;
@@ -2418,8 +2435,7 @@ parser::consume_string_literals(const token *t)
   // NB for versions prior to 2.0: but don't skip over intervening comments
   const token *n = peek();
   while (n != NULL && n->type == tok_string
-         && ! (strverscmp(session.compatible.c_str(), "2.0") < 0
-               && input.ate_comment))
+         && ! (!input.has_version("2.0") && input.ate_comment))
     {
       ls->value.append(next()->content); // consume and append the token
       n = peek();
@@ -2832,6 +2848,39 @@ parser::parse_foreach_loop ()
 
   s->base = parse_indexable();
 
+  // check if there was an array slice that was specified
+  t = peek();
+  if (t && t->type == tok_operator && t->content == "[")
+    {
+      swallow();
+      while (1)
+        {
+          t = peek();
+          if (t && t->type == tok_operator && t->content == "*")
+            {
+              swallow();
+              s->array_slice.push_back (NULL);
+            }
+          else
+            s->array_slice.push_back (parse_expression());
+
+          t = peek ();
+          if (t && t->type == tok_operator && t->content == ",")
+            {
+              swallow ();
+              continue;
+            }
+          else if (t && t->type == tok_operator && t->content == "]")
+            {
+              swallow ();
+              break;
+            }
+          else
+            throw PARSE_ERROR (_("expected ',' or ']'"));
+        }
+    }
+
+
   // check for atword, see also expect_ident_or_atword,
   t = peek ();
   if (t && t->type == tok_operator && t->content[0] == '@')
@@ -3075,8 +3124,17 @@ parser::parse_array_in ()
 
   while (1)
     {
-      expression* op1 = parse_comparison_or_regex_query ();
-      indexes.push_back (op1);
+      t = peek();
+      if (t && t->type == tok_operator && t->content == "*" && parenthesized)
+        {
+          swallow();
+          indexes.push_back(NULL);
+        }
+      else
+        {
+          expression* op1 = parse_comparison_or_regex_query ();
+          indexes.push_back (op1);
+        }
 
       if (parenthesized)
         {
@@ -3294,12 +3352,12 @@ parser::parse_crement () // as in "increment" / "decrement"
       e->op = t->content;
       e->tok = t;
       next ();
-      e->operand = parse_value ();
+      e->operand = parse_dwarf_value ();
       return e;
     }
 
   // post-crement or non-crement
-  expression *op1 = parse_value ();
+  expression *op1 = parse_dwarf_value ();
 
   t = peek ();
   if (t && t->type == tok_operator
@@ -3314,6 +3372,53 @@ parser::parse_crement () // as in "increment" / "decrement"
     }
   else
     return op1;
+}
+
+
+expression*
+parser::parse_dwarf_value ()
+{
+  expression* expr = NULL;
+  target_symbol* tsym = NULL;
+
+  // With '&' we'll definitely be making a target symbol of some sort
+  const token* addrtok = peek_op ("&") ? next () : NULL;
+  bool addressof = (addrtok != NULL);
+
+  // First try target_symbol types: $var, @cast, and @var.
+  const token* t = peek ();
+  if (t && t->type == tok_identifier && t->content[0] == '$')
+    expr = tsym = parse_target_symbol ();
+  else if (tok_is (t, tok_operator, "@cast"))
+    expr = tsym = parse_cast_op ();
+  else if (tok_is (t, tok_operator, "@var"))
+    expr = tsym = parse_atvar_op ();
+  else if (addressof && !input.has_version("2.6"))
+    // '&' on old version only allowed specific target_symbol types
+    throw PARSE_ERROR (_("expected @cast, @var or $var"));
+  else
+    // Otherwise just get a plain value of any sort.
+    expr = parse_value ();
+
+  // If we had '&' or see any target suffixes, that forces a target_symbol.
+  // For compatibility, we only do this starting with 2.6.
+  if (!tsym && (addressof || peek_target_symbol_components ())
+      && input.has_version("2.6"))
+    {
+      autocast_op *cop = new autocast_op;
+      cop->tok = addrtok ?: peek ();
+      cop->operand = expr;
+      expr = tsym = cop;
+    }
+
+  if (tsym)
+    {
+      // Parse the rest of any kind of target symbol
+      tsym->addressof = addressof;
+      parse_target_symbol_components (tsym);
+    }
+
+  return expr;
 }
 
 
@@ -3345,11 +3450,6 @@ parser::parse_value ()
         throw PARSE_ERROR (_("expected ')'"));
       swallow ();
       return e;
-    }
-  else if (t->type == tok_operator && t->content == "&")
-    {
-      next (); // Cannot swallow, passing token on...
-      return parse_target_symbol (t);
     }
   else if (t->type == tok_identifier
            || (t->type == tok_operator && t->content[0] == '@'))
@@ -3408,8 +3508,8 @@ parser::parse_indexable ()
 }
 
 
-// var, indexable[index], func(parms), printf("...", ...), $var,r
-// @cast, @defined, @entry, @var, $var->member, @stat_op(stat)
+// var, indexable[index], func(parms), printf("...", ...),
+// @defined, @entry, @stat_op(stat)
 expression* parser::parse_symbol ()
 {
   hist_op *hop = NULL;
@@ -3421,12 +3521,7 @@ expression* parser::parse_symbol ()
     {
       // If we didn't get a hist_op, then we did get an identifier. We can
       // now scrutinize this identifier for the various magic forms of identifier
-      // (printf, @stat_op, and $var...)
-
-      if (name == "@cast"
-	  || name == "@var"
-	  || (name.size() > 0 && name[0] == '$'))
-        return parse_target_symbol (t);
+      // (printf, @stat_op...)
 
       // NB: PR11343: @defined() is not incompatible with earlier versions
       // of stap, so no need to check session.compatible for 1.2
@@ -3520,10 +3615,8 @@ expression* parser::parse_symbol ()
 		  // Consume and convert a format string. Agreement between the
 		  // format string and the arguments is postponed to the
 		  // typechecking phase.
-		  string tmp;
-		  expect_unknown (tok_string, tmp);
-		  fmt->raw_components = tmp;
-		  fmt->components = print_format::string_to_components (tmp);
+		  fmt->raw_components = parse_literal_string()->value;
+		  fmt->components = print_format::string_to_components (fmt->raw_components);
 		  consumed_arg = true;
 		}
 	      else if (fmt->print_with_delim)
@@ -3531,7 +3624,7 @@ expression* parser::parse_symbol ()
 		  // Consume a delimiter to separate arguments.
 		  fmt->delimiter.clear();
 		  fmt->delimiter.type = print_format::conv_literal;
-		  expect_unknown (tok_string, fmt->delimiter.literal_string);
+		  fmt->delimiter.literal_string = parse_literal_string()->value;
 		  consumed_arg = true;
 		  min_args = 2; // so that the delim is used at least once
 		}
@@ -3619,7 +3712,13 @@ expression* parser::parse_symbol ()
 
       while (1)
         {
-          ai->indexes.push_back (parse_expression ());
+          if (peek_op("*"))
+            {
+              swallow();
+              ai->indexes.push_back (NULL);
+            }
+          else
+            ai->indexes.push_back (parse_expression ());
           if (peek_op ("]"))
             {
 	      swallow ();
@@ -3633,6 +3732,7 @@ expression* parser::parse_symbol ()
           else
             throw PARSE_ERROR (_("expected ',' or ']'"));
         }
+
       return ai;
     }
 
@@ -3646,20 +3746,27 @@ expression* parser::parse_symbol ()
   return sym;
 }
 
-// Parse a @cast or $var.  Given head token has already been consumed.
-target_symbol* parser::parse_target_symbol (const token* t)
+// Parse a $var.
+target_symbol* parser::parse_target_symbol ()
 {
-  bool addressof = false;
-  if (t->type == tok_operator && t->content == "&")
+  const token* t = next ();
+  if (t->type == tok_identifier && t->content[0]=='$')
     {
-      addressof = true;
-      // Don't delete t before trying next token.
-      // We might need it in the error message when there is no next token.
-      const token *next_t = next ();
-      delete t;
-      t = next_t;
+      // target_symbol time
+      target_symbol *tsym = new target_symbol;
+      tsym->tok = t;
+      tsym->name = t->content;
+      return tsym;
     }
 
+  throw PARSE_ERROR (_("expected $var"));
+}
+
+
+// Parse a @cast.
+cast_op* parser::parse_cast_op ()
+{
+  const token* t = next ();
   if (t->type == tok_operator && t->content == "@cast")
     {
       cast_op *cop = new cast_op;
@@ -3669,28 +3776,25 @@ target_symbol* parser::parse_target_symbol (const token* t)
       cop->operand = parse_expression ();
       expect_op(",");
       expect_unknown(tok_string, cop->type_name);
+      if (cop->type_name.empty())
+        throw PARSE_ERROR (_("expected non-empty string"));
       if (peek_op (","))
         {
           swallow ();
           expect_unknown(tok_string, cop->module);
         }
       expect_op(")");
-      parse_target_symbol_components(cop);
-      cop->addressof = addressof;
       return cop;
     }
 
-  if (t->type == tok_identifier && t->content[0]=='$')
-    {
-      // target_symbol time
-      target_symbol *tsym = new target_symbol;
-      tsym->tok = t;
-      tsym->name = t->content;
-      parse_target_symbol_components(tsym);
-      tsym->addressof = addressof;
-      return tsym;
-    }
+  throw PARSE_ERROR (_("expected @cast"));
+}
 
+
+// Parse a @var.
+atvar_op* parser::parse_atvar_op ()
+{
+  const token* t = next ();
   if (t->type == tok_operator && t->content == "@var")
     {
       atvar_op *aop = new atvar_op;
@@ -3711,12 +3815,10 @@ target_symbol* parser::parse_target_symbol (const token* t)
       else
         aop->module = "";
       expect_op(")");
-      parse_target_symbol_components(aop);
-      aop->addressof = addressof;
       return aop;
     }
 
-  throw PARSE_ERROR (_("expected @cast, @var or $var"));
+  throw PARSE_ERROR (_("expected @var"));
 }
 
 
@@ -3726,9 +3828,7 @@ expression* parser::parse_defined_op (const token* t)
   defined_op* dop = new defined_op;
   dop->tok = t;
   expect_op("(");
-  // no need for parse_hist_op... etc., as @defined takes only target_symbols as its operand.
-  const token* tt = next ();
-  dop->operand = parse_target_symbol (tt);
+  dop->operand = parse_expression ();
   expect_op(")");
   return dop;
 }
@@ -3760,6 +3860,15 @@ expression* parser::parse_perf_op (const token* t)
 }
 
 
+bool
+parser::peek_target_symbol_components ()
+{
+  const token * t = peek ();
+  return t &&
+    ((t->type == tok_operator && (t->content == "->" || t->content == "["))
+     || (t->type == tok_identifier &&
+         t->content.find_first_not_of('$') == string::npos));
+}
 
 void
 parser::parse_target_symbol_components (target_symbol* e)

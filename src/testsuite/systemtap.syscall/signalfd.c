@@ -1,4 +1,4 @@
-/* COVERAGE: signalfd */
+/* COVERAGE: signalfd signalfd4 */
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -30,6 +30,16 @@ int main()
   sfd = signalfd(-1, &mask, SFD_NONBLOCK|SFD_CLOEXEC);
   //staptest// signalfd4 (-1, XXXX, NNNN, SFD_NONBLOCK|SFD_CLOEXEC) = NNNN
 #endif
+
+  signalfd(sfd, (sigset_t *)-1, 0);
+#ifdef __s390__
+  //staptest// signalfd (NNNN, 0x[7]?[f]+, NNNN) = NNNN
+#else
+  //staptest// signalfd (NNNN, 0x[f]+, NNNN) = NNNN
+#endif
+
+  signalfd(-1, &mask, -1);
+  //staptest// signalfd4 (-1, XXXX, NNNN, SFD_[^ ]+|XXXX) = NNNN
 
   return 0;
 }

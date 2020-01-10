@@ -323,9 +323,11 @@ compile_pass (systemtap_session& s)
   output_autoconf(s, o, "autoconf-uaccess.c", "STAPCONF_LINUX_UACCESS_H", NULL);
   output_autoconf(s, o, "autoconf-oneachcpu-retry.c", "STAPCONF_ONEACHCPU_RETRY", NULL);
   output_autoconf(s, o, "autoconf-dpath-path.c", "STAPCONF_DPATH_PATH", NULL);
+  output_exportconf(s, o, "synchronize_kernel", "STAPCONF_SYNCHRONIZE_KERNEL");
+  output_exportconf(s, o, "synchronize_rcu", "STAPCONF_SYNCHRONIZE_RCU");
   output_exportconf(s, o, "synchronize_sched", "STAPCONF_SYNCHRONIZE_SCHED");
   output_autoconf(s, o, "autoconf-task-uid.c", "STAPCONF_TASK_UID", NULL);
-  output_exportconf(s, o, "from_kuid_munged", "STAPCONF_FROM_KUID_MUNGED");
+  output_autoconf(s, o, "autoconf-from_kuid_munged.c", "STAPCONF_FROM_KUID_MUNGED", NULL);
   output_dual_exportconf(s, o, "alloc_vm_area", "free_vm_area", "STAPCONF_VM_AREA");
   output_autoconf(s, o, "autoconf-procfs-owner.c", "STAPCONF_PROCFS_OWNER", NULL);
   output_autoconf(s, o, "autoconf-alloc-percpu-align.c", "STAPCONF_ALLOC_PERCPU_ALIGN", NULL);
@@ -383,6 +385,7 @@ compile_pass (systemtap_session& s)
   output_autoconf(s, o, "autoconf-compat_sigaction.c", "STAPCONF_COMPAT_SIGACTION", NULL);
   output_autoconf(s, o, "autoconf-netfilter.c", "STAPCONF_NETFILTER_V313", NULL);
   output_autoconf(s, o, "autoconf-smpcall-5args.c", "STAPCONF_SMPCALL_5ARGS", NULL);
+  output_autoconf(s, o, "autoconf-smpcall-4args.c", "STAPCONF_SMPCALL_4ARGS", NULL);
 
   // used by tapset/timestamp_monotonic.stp
   output_exportconf(s, o, "cpu_clock", "STAPCONF_CPU_CLOCK");
@@ -404,6 +407,8 @@ compile_pass (systemtap_session& s)
 
   // used by runtime/stp_utrace.c
   output_exportconf(s, o, "task_work_add", "STAPCONF_TASK_WORK_ADD_EXPORTED");
+  output_exportconf(s, o, "wake_up_state", "STAPCONF_WAKE_UP_STATE_EXPORTED");
+  output_exportconf(s, o, "try_to_wake_up", "STAPCONF_TRY_TO_WAKE_UP_EXPORTED");
   output_exportconf(s, o, "signal_wake_up_state", "STAPCONF_SIGNAL_WAKE_UP_STATE_EXPORTED");
   output_exportconf(s, o, "signal_wake_up", "STAPCONF_SIGNAL_WAKE_UP_EXPORTED");
   output_exportconf(s, o, "__lock_task_sighand", "STAPCONF___LOCK_TASK_SIGHAND_EXPORTED");
@@ -451,6 +456,9 @@ compile_pass (systemtap_session& s)
   // 256^W512 bytes should be enough for anybody
   // XXX this doesn't validate varargs, per gcc bug #41633
   o << "EXTRA_CFLAGS += $(call cc-option,-Wframe-larger-than=512)" << endl;
+
+  // gcc 5.0.0-0.13.fc23 ipa-icf seems to consume gigacpu on stap-generated code
+  o << "EXTRA_CFLAGS += $(call cc-option,-fno-ipa-icf)" << endl;
 
   // Assumes linux 2.6 kbuild
   o << "EXTRA_CFLAGS += -Wno-unused" << (s.omit_werror ? "" : " -Werror") << endl;

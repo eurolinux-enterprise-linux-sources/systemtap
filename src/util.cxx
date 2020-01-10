@@ -496,6 +496,15 @@ string find_executable(const string& name, const string& sysroot,
 }
 
 
+bool is_fully_resolved(const string& path, const string& sysroot,
+		       const map<string, string>& sysenv,
+		       const string& env_path)
+{
+  return !path.empty()
+      && !contains_glob_chars(path)
+      && path.find('/') != string::npos
+      && path == find_executable(path, sysroot, sysenv, env_path);
+}
 
 const string cmdstr_quoted(const string& cmd)
 {
@@ -638,7 +647,7 @@ stap_waitpid(int verbose, pid_t pid)
       spawned_pids.erase(pid);
       ret = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
       if (verbose > 1)
-        clog << _F("Spawn waitpid result (0x%x): %d", status, ret) << endl;
+        clog << _F("Spawn waitpid result (0x%x): %d", (unsigned)status, ret) << endl;
     }
   else
     {
@@ -1097,6 +1106,23 @@ get_self_path()
   // otherwise the path is ridiculously large, fall back to /proc/self/exe.
   //
   return string(file);
+}
+
+bool
+is_valid_pid (pid_t pid, string& err_msg)
+{
+  err_msg = "";
+  if (pid <= 0)
+    {
+      err_msg = _F("cannot probe pid %d: Invalid pid", pid);
+      return false;
+    }
+  else if (kill(pid, 0) == -1)
+    {
+      err_msg = _F("cannot probe pid %d: %s", pid, strerror(errno));
+      return false;
+    }
+  return true;
 }
 
 // String sorter using the Levenshtein algorithm

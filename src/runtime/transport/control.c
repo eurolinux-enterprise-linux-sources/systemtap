@@ -29,8 +29,9 @@ static void _stp_handle_remote_id (struct _stp_msg_remote_id* rem);
 
 static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
+        static DEFINE_MUTEX(cmd_mutex);
 	u32 type;
-	static int started = 0;
+        int rc = 0;
 
 #ifdef STAPCONF_TASK_UID
 	uid_t euid = current->euid;
@@ -57,30 +58,45 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
 			    (int)count);
 #endif
 
+        // PR17232: preclude reentrancy during handling of messages.
+        // This also permits use of static variables in the switch/case.
+        mutex_lock (& cmd_mutex);
+        // NB: past this point, no 'return;' - use 'goto out;'
+
 	switch (type) {
 	case STP_START:
-		if (started == 0) {
-			struct _stp_msg_start st;
-			if (count < sizeof(st))
-				return 0;
-			if (copy_from_user(&st, buf, sizeof(st)))
-				return -EFAULT;
-			_stp_handle_start(&st);
-			started = 1;
-		}
-		break;
+        {
+                static struct _stp_msg_start st;
+                if (count < sizeof(st)) {
+                        rc = 0; // ?
+                        goto out;
+                }
+                if (copy_from_user(&st, buf, sizeof(st))) {
+                        rc = -EFAULT;
+                        goto out;
+                }
+                _stp_handle_start(&st);
+        }
+        break;
+
 	case STP_EXIT:
-		_stp_cleanup_and_exit(1);
+                _stp_cleanup_and_exit(1);
 		break;
+
 	case STP_BULK:
 #ifdef STP_BULKMODE
-		return count + sizeof(u32);
+                // no action needed
+                break;
 #else
-		return -EINVAL;
+		rc = -EINVAL;
+                goto out;
 #endif
+
 	case STP_RELOCATION:
-		if (euid != 0)
-			return -EPERM;
+		if (euid != 0) {
+                        rc = -EPERM;
+                        goto out;
+                }
                 /* This message is too large to copy here.
                    Further error checking is within the
                    function, but XXX no rc is passed back. */
@@ -98,12 +114,18 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
                    (euid=0) isn't multithreaded, and doesn't pass this
                    filehandle anywhere. */
                 static struct _stp_msg_tzinfo tzi;
-		if (euid != 0)
-			return -EPERM;
-                if (count < sizeof(tzi))
-                        return 0;
-                if (copy_from_user(&tzi, buf, sizeof(tzi)))
-                        return -EFAULT;
+		if (euid != 0) {
+                        rc = -EPERM;
+                        goto out;
+                }
+                if (count < sizeof(tzi)) {
+                        rc = 0;
+                        goto out;
+                }
+                if (copy_from_user(&tzi, buf, sizeof(tzi))) {
+                        rc = -EFAULT;
+                        goto out;
+                }
                 _stp_handle_tzinfo(&tzi);
         }
         break;
@@ -112,12 +134,18 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
         {
                 /* NB PR13445: as above. */
                 static struct _stp_msg_privilege_credentials pc;
-		if (euid != 0)
-			return -EPERM;
-                if (count < sizeof(pc))
-                        return 0;
-                if (copy_from_user(&pc, buf, sizeof(pc)))
-                        return -EFAULT;
+		if (euid != 0) {
+                        rc = -EPERM;
+                        goto out;
+                }
+                if (count < sizeof(pc)) {
+                        rc = 0;
+                        goto out;
+                }
+                if (copy_from_user(&pc, buf, sizeof(pc))) {
+                        rc = -EFAULT;
+                        goto out;
+                }
                 _stp_handle_privilege_credentials(&pc);
         }
         break;
@@ -126,12 +154,18 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
         {
                 /* NB PR13445: as above. */
                 static struct _stp_msg_remote_id rem;
-		if (euid != 0)
-			return -EPERM;
-                if (count < sizeof(rem))
-                        return 0;
-                if (copy_from_user(&rem, buf, sizeof(rem)))
-                        return -EFAULT;
+		if (euid != 0) {
+                        rc = -EPERM;
+                        goto out;
+                }
+                if (count < sizeof(rem)) {
+                        rc = 0;
+                        goto out;
+                }
+                if (copy_from_user(&rem, buf, sizeof(rem))) {
+                        rc = -EFAULT;
+                        goto out;
+                }
                 _stp_handle_remote_id(&rem);
         }
         break;
@@ -143,10 +177,21 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
 #ifdef DEBUG_TRANS
 		dbug_trans2("invalid command type %d\n", type);
 #endif
-		return -EINVAL;
+		rc = -EINVAL;
+                goto out;
 	}
 
-	return count + sizeof(u32); /* Pretend that we absorbed the entire message. */
+        // fall through
+	rc = count + sizeof(u32); /* Pretend that we absorbed the entire message. */
+
+out:
+        mutex_unlock (& cmd_mutex);
+
+#if defined(DEBUG_TRANS) && (DEBUG_TRANS >= 2)
+	if (type < STP_MAX_CMD)
+		dbug_trans2("Completed %s (rc=%d)\n", _stp_command_name[type], rc);
+#endif
+        return rc;
 }
 
 static DECLARE_WAIT_QUEUE_HEAD(_stp_ctl_wq);
@@ -295,6 +340,52 @@ static int _stp_ctl_alloc_special_buffers(void)
 	memcpy(&_stp_ctl_realtime_err->buf, msg, len);
 
 	return 0;
+}
+
+
+/* Free the buffers for all "special" message types, plus generic
+   warning and error messages.  */
+static void _stp_ctl_free_special_buffers(void)
+{
+	if (_stp_ctl_start_msg != NULL) {
+		_stp_mempool_free(_stp_ctl_start_msg);
+		_stp_ctl_start_msg = NULL;
+	}
+
+	if (_stp_ctl_exit_msg != NULL) {
+		_stp_mempool_free(_stp_ctl_exit_msg);
+		_stp_ctl_exit_msg = NULL;
+	}
+
+	if (_stp_ctl_transport_msg != NULL) {
+		_stp_mempool_free(_stp_ctl_transport_msg);
+		_stp_ctl_transport_msg = NULL;
+	}
+
+	if (_stp_ctl_request_exit_msg != NULL) {
+		_stp_mempool_free(_stp_ctl_request_exit_msg);
+		_stp_ctl_request_exit_msg = NULL;
+	}
+
+	if (_stp_ctl_oob_warn != NULL) {
+		_stp_mempool_free(_stp_ctl_oob_warn);
+		_stp_ctl_oob_warn = NULL;
+	}
+
+	if (_stp_ctl_oob_err != NULL) {
+		_stp_mempool_free(_stp_ctl_oob_err);
+		_stp_ctl_oob_err = NULL;
+	}
+
+	if (_stp_ctl_system_warn != NULL) {
+		_stp_mempool_free(_stp_ctl_system_warn);
+		_stp_ctl_system_warn = NULL;
+	}
+
+	if (_stp_ctl_realtime_err != NULL) {
+		_stp_mempool_free(_stp_ctl_realtime_err);
+		_stp_ctl_realtime_err = NULL;
+	}
 }
 
 
@@ -631,14 +722,15 @@ err0:
 
 static void _stp_unregister_ctl_channel(void)
 {
-	struct list_head *p, *tmp;
+	struct _stp_buffer *bptr, *tmp;
 
 	_stp_unregister_ctl_channel_fs();
 
 	/* Return memory to pool and free it. */
-	list_for_each_safe(p, tmp, &_stp_ctl_ready_q) {
-		list_del(p);
-		_stp_mempool_free(p);
+	list_for_each_entry_safe(bptr, tmp, &_stp_ctl_ready_q, list) {
+		list_del(&bptr->list);
+		_stp_ctl_free_buffer(bptr);
 	}
+	_stp_ctl_free_special_buffers();
 	_stp_mempool_destroy(_stp_pool_q);
 }

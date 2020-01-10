@@ -8,6 +8,8 @@ if {[installtest_p]} {
     set dtrace ../dtrace
 }
 
+# Create the test .d files
+
 exec mkdir -p /tmp/dtrace
 
 set dpath "/tmp/dtrace/test.d"
@@ -18,7 +20,9 @@ puts $fp "
 
 provider tstsyscall
 {
- probe test(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5)
+ probe test0();
+ probe test1(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5);
+ probe test2(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5);
 }
 "
 close $fp
@@ -39,22 +43,47 @@ puts $fp "
 
 provider tstsyscall
 {
- probe test(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5)
+ probe test0();
+ probe test1(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5);
+ probe test2(INT16 arg1, INT32 arg2, INT32 arg3, INT32 arg4, struct astruct arg5);
 }
 "
 close $fp
+
+set pypath "/tmp/pypath.d"
+set $fp [open $pypath "w"]
+puts $fp "
+#include <sys/types.h>
+
+provider alpha {
+	probe request__start(string, uint8_t, uint16_t, int, void *);
+	probe request__one(string, uint8_t, uint32_t, int, int);
+	probe client__two(int, int);
+	probe client__three(int, string, pid_t, zoneid_t);
+	probe input__stop(int, int, uint32_t, uint32_t, int8_t, uint8_t*, double*);
+};
+
+#ifdef DCL_AFTER_PROVIDER
+typedef unsigned short int __u_short;
+typedef const static unsigned short __u_c_short;
+#endif
+
+#pragma D attributes Unknown provider alpha provider
+"
+close $fp
+
 
 set incpath "/tmp/dtrace_inc"
 
 # -----------------------------------------------------------------
 # test command line option and file handling 
 
-verbose -log "$dtrace -G -s $dpath -o XXX.o"
-catch {exec $dtrace -G -s $dpath -o XXX.o}
+verbose -log "$dtrace -G -64 -fPIC -s $dpath -o XXX.o"
+catch {exec $dtrace -G -64 -fPIC -s $dpath -o XXX.o}
 if {[file exists XXX.o]} then {
-    pass "dtrace -G -o XXX.o"
+    pass "dtrace -G -64 -fPIC -o XXX.o"
 } else {
-    fail "dtrace -G -o XXX.o"
+    fail "dtrace -G -64 -fPIC -o XXX.o"
 }
 exec rm -f XXX.o
 
@@ -152,6 +181,9 @@ if { $ok != 0} {
     fail "dtrace CFLAGS= CC="
 }
 
+# -----------------------------------------------------------------
+# test -h header file creation
+
 set ok 0
 verbose -log "$dtrace -C -h -s $dpath -o XXX.h"
 catch {exec $dtrace -C -h -s $dpath -o XXX.h}
@@ -172,15 +204,67 @@ verbose -log "$dtrace -C -I$incpath -h -s $idpath -o XXX.h"
 catch {exec $dtrace -C -I$incpath -h -s $idpath -o XXX.h}
 spawn cat XXX.h
 expect {
-    "short arg1, int arg2, int arg3, int arg4" {incr ok}
+    -re {DTRACE_PROBE \(tstsyscall, test0\)} {incr ok; exp_continue}
+    -re {short arg1, int arg2, int arg3, int arg4} {incr ok; exp_continue}
+    -re {DTRACE_PROBE. \(tstsyscall, test., arg1, arg2, arg3, arg4, arg5\)} {incr ok}
+    eof { }
 }
 catch {close}; catch {wait}
-if { $ok != 0} {
+if { $ok == 4} {
     pass "dtrace -C -Iincpath -h -o XXX.h"
 } else {
-    fail "dtrace -C -Iincpath -h -o XXX.h"
+    fail "dtrace -C -Iincpath -h -o XXX.h $ok"
 }
 exec rm -f XXX.h
+
+# -----------------------------------------------------------------
+# test --no-pyparsing
+
+set ok 0
+verbose -log "$dtrace -C --no-pyparsing -I$incpath -h -s $idpath -o XXX.h"
+catch {exec $dtrace -C --no-pyparsing -I$incpath -h -s $idpath -o XXX.h}
+spawn cat XXX.h
+expect {
+    -re {DTRACE_PROBE \(tstsyscall, test0\)} {incr ok; exp_continue}
+    -re {short arg1, int arg2, int arg3, int arg4} {incr ok; exp_continue}
+    -re {DTRACE_PROBE. \(tstsyscall, test., arg1, arg2, arg3, arg4, arg5\)} {incr ok}
+    eof { }
+}
+catch {close}; catch {wait}
+if { $ok == 4} {
+    pass "dtrace -C --no-pyparsing -Iincpath -h -o XXX.h"
+} else {
+    fail "dtrace -C --no-pyparsing -Iincpath -h -o XXX.h $ok"
+}
+exec rm -f XXX.h
+
+# -----------------------------------------------------------------
+# test fallback to --no-pyparsing
+
+if {[catch {exec python -c "import pyparsing"} res]} then {
+    untested "dtrace parser check"
+} else {
+    set ok 0
+    verbose -log "$dtrace -C -h -s $pypath -o XXX.h"
+    spawn $dtrace -C -DDCL_AFTER_PROVIDER -h -s $pypath -o XXX.h
+    expect {
+        -re {Warning.*syntax error} {incr ok; exp_continue}
+        -re {Warning.*--no-pyparsing} {incr ok; exp_continue}
+        eof { }
+    }
+    catch {close}; catch {wait}
+    if {[file exists XXX.h]} then {
+        incr ok;
+    }
+    if { $ok == 3} {
+        pass "dtrace parser check"
+    } else {
+        fail "dtrace parser check $ok"
+    }
+    exec rm -f XXX.h
+}
+# -----------------------------------------------------------------
+# test -G object file creation
 
 verbose -log "$dtrace -I$incpath -G -s $idpath"
 catch {exec $dtrace -G -s $dpath}
@@ -190,6 +274,52 @@ if {[file exists test.o]} then {
     fail "dtrace -Iincpath -G"
 }
 exec rm -f test.o
+
+# -----------------------------------------------------------------
+# test dtrace for pyparsing / --no-pyparsing compatibility
+
+set ok 0
+set dfiles {dtrace}
+foreach i $dfiles {
+    verbose -log "$dtrace $srcdir/$subdir/$i.d"
+    catch {exec $dtrace -C -h -s $srcdir/$subdir/$i.d -o $i-1.h}
+    catch {exec $dtrace -C -h --no-pyparsing -s $srcdir/$subdir/$i.d -o $i-2.h}
+    spawn diff -wqs $i-1.h $i-2.h
+    expect {
+	-re {Files.*identical} {incr ok; exp_continue}
+	eof { }
+    }
+    catch {exec $dtrace -C -G -s $srcdir/$subdir/$i.d -o $i-1.o}
+    catch {exec $dtrace -C -G --no-pyparsing -s $srcdir/$subdir/$i.d -o $i-2.o}
+    verbose -log "exec nm $i-1.o > $i-1.od"
+    catch {exec nm $i-1.o > $i-1.od}
+    catch {exec nm $i-2.o > $i-2.od}
+    spawn diff -qs $i-1.od $i-2.od
+    expect {
+	-re {Files.*identical} {incr ok; exp_continue}
+	eof { }
+    }
+    catch {exec /bin/rm $i-1.h $i-2.h $i-1.o $i-2.o}
+}
+if { $ok == 2} {
+    pass "dtrace known uses"
+} else {
+    fail "dtrace known uses ${ok}"
+}
+
+# -----------------------------------------------------------------
+verbose -log "$dtrace -x IGNORED -h -s $dpath"
+catch {exec $dtrace -x IGNORED -h -s $dpath}
+if {[file exists test.h]} then {
+    pass "dtrace -x IGNORED"
+} else {
+    fail "dtrace -x IGNORED"
+}
+exec rm -f test.o
+
+
+# -----------------------------------------------------------------
+# cleanup
 
 exec /bin/rm -r /tmp/dtrace /tmp/dtrace_inc
 # -----------------------------------------------------------------

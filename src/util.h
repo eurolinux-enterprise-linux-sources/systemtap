@@ -71,6 +71,10 @@ std::string find_executable(const std::string& name,
 			    const std::string& sysroot,
 			    const std::map<std::string,std::string>& sysenv,
 			    const std::string& env_path = "PATH");
+bool is_fully_resolved(const std::string& name,
+                       const std::string& sysroot,
+                       const std::map<std::string,std::string>& sysenv,
+                       const std::string& env_path = "PATH");
 const std::string cmdstr_quoted(const std::string& cmd);
 const std::string cmdstr_join(const std::vector<std::string>& cmds);
 int stap_waitpid(int verbose, pid_t pid);
@@ -98,6 +102,7 @@ int elf_class_from_normalized_machine(const std::string& machine);
 std::string autosprintf(const char* format, ...) __attribute__ ((format (printf, 1, 2)));
 const std::set<std::string>& localization_variables();
 std::string get_self_path();
+bool is_valid_pid (pid_t pid, std::string& err_msg);
 
 // stringification generics
 

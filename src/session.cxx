@@ -34,6 +34,7 @@ extern "C" {
 #include <sys/utsname.h>
 #include <sys/resource.h>
 #include <elfutils/libdwfl.h>
+#include <elfutils/version.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <wordexp.h>
@@ -64,7 +65,6 @@ systemtap_session::systemtap_session ():
   runtime_mode(kernel_runtime),
   base_hash(0),
   pattern_root(new match_node),
-  user_file (0),
   dfa_counter (0),
   dfa_maxstate (0),
   dfa_maxtag (0),
@@ -86,7 +86,6 @@ systemtap_session::systemtap_session ():
   hrtimer_derived_probes(0),
   procfs_derived_probes(0),
   dynprobe_derived_probes(0),
-  java_derived_probes(0),
   op (0), up (0),
   sym_kprobes_text_start (0),
   sym_kprobes_text_end (0),
@@ -134,6 +133,7 @@ systemtap_session::systemtap_session ():
   output_file = ""; // -o FILE
   tmpdir_opt_set = false;
   save_module = false;
+  save_uprobes = false;
   modname_given = false;
   keep_tmpdir = false;
   cmd = "";
@@ -145,6 +145,7 @@ systemtap_session::systemtap_session ():
   need_uprobes = false;
   need_unwind = false;
   need_symbols = false;
+  need_lines = false;
   uprobes_path = "";
   load_only = false;
   skip_badvars = false;
@@ -249,8 +250,9 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   runtime_mode(other.runtime_mode),
   base_hash(0),
   pattern_root(new match_node),
-  user_file (other.user_file),
+  user_files (other.user_files),
   dfa_counter(0),
+  dfa_maxtag (0),
   need_tagged_dfa(other.need_tagged_dfa),
   be_derived_probes(0),
   dwarf_derived_probes(0),
@@ -269,7 +271,6 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   hrtimer_derived_probes(0),
   procfs_derived_probes(0),
   dynprobe_derived_probes(0),
-  java_derived_probes(0),
   op (0), up (0),
   sym_kprobes_text_start (0),
   sym_kprobes_text_end (0),
@@ -314,6 +315,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   output_file = other.output_file; // XXX how should multiple remotes work?
   tmpdir_opt_set = false;
   save_module = other.save_module;
+  save_uprobes = other.save_uprobes;
   modname_given = other.modname_given;
   keep_tmpdir = other.keep_tmpdir;
   cmd = other.cmd;
@@ -325,6 +327,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   need_uprobes = false;
   need_unwind = false;
   need_symbols = false;
+  need_lines = false;
   uprobes_path = "";
   load_only = other.load_only;
   skip_badvars = other.skip_badvars;
@@ -362,6 +365,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   // copy them from "other".  In the same order as declared...
   script_file = other.script_file;
   cmdline_script = other.cmdline_script;
+  additional_scripts = other.additional_scripts;
   c_macros = other.c_macros;
   args = other.args;
   kbuildflags = other.kbuildflags;
@@ -423,14 +427,31 @@ systemtap_session::clone(const string& arch, const string& release)
   return s;
 }
 
+
+string
+systemtap_session::version_string ()
+{
+  string elfutils_version1;
+#ifdef _ELFUTILS_VERSION
+  elfutils_version1 = "0." + lex_cast(_ELFUTILS_VERSION);
+#endif
+  string elfutils_version2 = dwfl_version(NULL);
+
+  if (elfutils_version1 != elfutils_version2)
+    elfutils_version2 += string("/") + elfutils_version1;
+
+  return string (VERSION) + "/" + elfutils_version2 + ", " + STAP_EXTENDED_VERSION;
+}
+
 void
 systemtap_session::version ()
 {
-  clog << _F("Systemtap translator/driver (version %s/%s, %s)\n"
+  cout << _F("Systemtap translator/driver (version %s)\n"
              "Copyright (C) 2005-2014 Red Hat, Inc. and others\n"
-             "This is free software; see the source for copying conditions.",
-             VERSION, dwfl_version(NULL), STAP_EXTENDED_VERSION) << endl;
-  clog << _("enabled features:")
+             "This is free software; see the source for copying conditions.\n",
+             version_string().c_str());
+
+  cout << _("enabled features:")
 #ifdef HAVE_AVAHI
        << " AVAHI"
 #endif
@@ -482,7 +503,7 @@ systemtap_session::usage (int exitcode)
     }
 
   version ();
-  clog
+  cout
     << endl
     << _F(
      "Usage: stap [options] FILE                    Run script in file.\n"
@@ -502,10 +523,10 @@ systemtap_session::usage (int exitcode)
      "   -v         add verbosity to all passes\n"
      "   --vp {N}+  add per-pass verbosity [", data_path.c_str(), last_pass);
   for (unsigned i=0; i<5; i++)
-    clog << (perpass_verbose[i] <= 9 ? perpass_verbose[i] : 9);
-  clog 
+    cout << (perpass_verbose[i] <= 9 ? perpass_verbose[i] : 9);
+  cout 
     << "]" << endl;
-    clog << _F("   -k         keep temporary directory\n"
+    cout << _F("   -k         keep temporary directory\n"
      "   -u         unoptimized translation %s\n"
      "   -w         suppress warnings %s\n"
      "   -W         turn warnings into errors %s\n"
@@ -518,12 +539,12 @@ systemtap_session::usage (int exitcode)
          (guru_mode ? _(" [set]") : ""), (prologue_searching ? _(" [set]") : ""),
          (bulk_mode ? _(" [set]") : ""), buffer_size);
   if (include_path.size() == 0)
-    clog << endl;
+    cout << endl;
   else
-    clog << _(", in addition to") << endl;
+    cout << _(", in addition to") << endl;
   for (unsigned i=0; i<include_path.size(); i++)
-    clog << "              " << include_path[i].c_str() << endl;
-  clog
+    cout << "              " << include_path[i].c_str() << endl;
+  cout
     << _F("   -D NM=VAL  emit macro definition into generated C code\n"
     "   -B NM=VAL  pass option to kbuild make\n"
     "   --modinfo NM=VAL\n"
@@ -540,6 +561,8 @@ systemtap_session::usage (int exitcode)
     "              %s\n"
     "   -o FILE    send script output to file, instead of stdout. This supports\n" 
     "              strftime(3) formats for FILE\n"
+    "   -E SCRIPT  run the SCRIPT in addition to the main script specified\n"
+    "              through -e or a script file\n"
     "   -c CMD     start the probes, run CMD, and exit when it finishes\n"
     "   -x PID     sets target() to PID\n"
     "   -F         run as on-file flight recorder with -o.\n"
@@ -547,15 +570,15 @@ systemtap_session::usage (int exitcode)
     "   -S size[,n] set maximum of the size and the number of files.\n"
     "   -d OBJECT  add unwind/symbol data for OBJECT file", runtime_path.c_str(), kernel_build_tree.c_str(), architecture.c_str(), module_name.c_str());
   if (unwindsym_modules.size() == 0)
-    clog << endl;
+    cout << endl;
   else
-    clog << _(", in addition to") << endl;
+    cout << _(", in addition to") << endl;
   {
     vector<string> syms (unwindsym_modules.begin(), unwindsym_modules.end());
     for (unsigned i=0; i<syms.size(); i++)
-      clog << "              " << syms[i].c_str() << endl;
+      cout << "              " << syms[i].c_str() << endl;
   }
-  clog
+  cout
     << _F("   --ldd      add unwind/symbol data for all referenced object files.\n"
     "   --all-modules\n"
     "              add unwind/symbol data for all loaded kernel objects.\n"
@@ -616,6 +639,8 @@ systemtap_session::usage (int exitcode)
     "              relative to the sysroot.\n"
     "   --suppress-time-limits\n"
     "              disable -DSTP_OVERLOAD, -DMAXACTION, and -DMAXTRYACTION limits\n"
+    "   --save-uprobes\n"
+    "              save uprobes.ko to current directory if it is built from source\n"
     , compatible.c_str()) << endl
   ;
 
@@ -623,7 +648,7 @@ systemtap_session::usage (int exitcode)
   time (& now);
   struct tm* t = localtime (& now);
   if (t && t->tm_mon*3 + t->tm_mday*173 == 0xb6)
-    clog << morehelp << endl;
+    cout << morehelp << endl;
 
   throw exit_exception (exitcode);
 }
@@ -715,14 +740,21 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 
         case 'e':
 	  if (have_script)
-	    {
-	      cerr << _("Only one script can be given on the command line.")
-		   << endl;
+           {
+             cerr << _("Only one script can be given on the command line.")
+                  << endl;
               return 1;
-	    }
+           }
 	  server_args.push_back (string ("-") + (char)grc + optarg);
           cmdline_script = string (optarg);
           have_script = true;
+          break;
+
+        case 'E':
+          server_args.push_back (string("-") + (char)grc + optarg);
+          additional_scripts.push_back(string (optarg));
+          // don't set have_script to true, since this script is meant to be
+          // given in addition to a script/script_file.
           break;
 
         case 'o':
@@ -1362,6 +1394,10 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
                     strcmp(getenv("TERM") ?: "notdumb", "dumb"));
           break;
 
+        case LONG_OPT_SAVE_UPROBES:
+          save_uprobes = true;
+          break;
+
 	case '?':
 	  // Invalid/unrecognized option given or argument required, but
 	  // not given. In both cases getopt_long() will have printed the
@@ -1415,7 +1451,7 @@ systemtap_session::check_options (int argc, char * const argv [])
 {
   for (int i = optind; i < argc; i++)
     {
-      if (! have_script)
+      if (! have_script && ! dump_mode)
         {
           script_file = string (argv[i]);
           have_script = true;
@@ -1757,6 +1793,9 @@ systemtap_session::parse_kernel_functions ()
     }
   system_map.close();
 
+  if (kernel_functions.size() == 0)
+    print_warning ("Kernel function symbol table missing [man warning::symbols]", 0);
+
   if (verbose > 2)
     clog << _F("Parsed kernel \"%s\", ", system_map_path.c_str())
          << _NF("containing %zu symbol", "containing %zu symbols",
@@ -1770,11 +1809,45 @@ string
 systemtap_session::cmd_file ()
 {
   wordexp_t words;
-  int rc = wordexp (cmd.c_str (), &words, WRDE_NOCMD|WRDE_UNDEF);
   string file;
-  if(rc == 0 && words.we_wordc > 0)
-    file = words.we_wordv[0];
-  wordfree (& words);
+  
+  if (target_pid && cmd == "")
+    {
+      // check that the target_pid corresponds to a running process
+      string err_msg;
+      if(!is_valid_pid (target_pid, err_msg))
+        throw SEMANTIC_ERROR(err_msg);
+
+      file = string("/proc/") + lex_cast(target_pid) + "/exe";
+    }
+  else // default is to assume -c flag was given
+    {  
+      int rc = wordexp (cmd.c_str (), &words, WRDE_NOCMD|WRDE_UNDEF);
+      if(rc == 0)
+        {
+          if (words.we_wordc > 0)
+            file = words.we_wordv[0];
+          wordfree (& words);
+        }
+      else
+        {
+          switch (rc)
+            {
+              case WRDE_BADCHAR:
+                throw SEMANTIC_ERROR(_("command contains illegal characters"));
+              case WRDE_BADVAL:
+                throw SEMANTIC_ERROR(_("command contains undefined shell variables"));
+              case WRDE_CMDSUB:
+                throw SEMANTIC_ERROR(_("command contains command substitutions"));
+              case WRDE_NOSPACE:
+                throw SEMANTIC_ERROR(_("out of memory"));
+              case WRDE_SYNTAX:
+                throw SEMANTIC_ERROR(_("command contains shell syntax errors"));
+              default:
+                throw SEMANTIC_ERROR(_("unspecified wordexp failure"));
+           }  
+        }
+    }
   return file;
 }
 
@@ -1868,8 +1941,7 @@ void
 systemtap_session::register_library_aliases()
 {
   vector<stapfile*> files(library_files);
-  if (user_file) // May be NULL, e.g. in dump modes
-    files.push_back(user_file);
+  files.insert(files.end(), user_files.begin(), user_files.end());
 
   for (unsigned f = 0; f < files.size(); ++f)
     {
@@ -1970,12 +2042,18 @@ systemtap_session::build_error_msg (const semantic_error& e)
   message << colorize(_("semantic error:"), "error") << ' ' << e.what ();
   if (e.tok1 || e.tok2)
     message << ": ";
-  else if (verbose > 1) // no tokens to print, so print any errsrc right there
-    message << endl << _("   thrown from: ") << e.errsrc;
+  else
+    {
+      print_error_details (message, align_semantic_error, e);
+      message << endl;
+      if (verbose > 1) // no tokens to print, so print any errsrc right there
+	message << _("   thrown from: ") << e.errsrc;
+    }
 
   if (e.tok1)
     {
       print_token (message, e.tok1);
+      print_error_details (message, align_semantic_error, e);
       message << endl;
       if (verbose > 1)
         message << _("   thrown from: ") << e.errsrc << endl;
@@ -2055,9 +2133,19 @@ systemtap_session::print_error_source (std::ostream& message,
 }
 
 void
+systemtap_session::print_error_details (std::ostream& message,
+					std::string& align,
+					const semantic_error& e)
+{
+  for (size_t i = 0; i < e.details.size(); ++i)
+    message << endl << align << e.details[i];
+}
+
+void
 systemtap_session::print_warning (const string& message_str, const token* tok)
 {
-  if (suppress_warnings)
+  // Only output in dump mode if -vv is supplied:
+  if (suppress_warnings && (!dump_mode || verbose <= 1))
     return; // NB: don't count towards suppressed_warnings count
 
   // Duplicate elimination
@@ -2325,7 +2413,7 @@ bool
 systemtap_session::modules_must_be_signed()
 {
   ifstream statm("/sys/module/module/parameters/sig_enforce");
-  char status;
+  char status = 'N';
 
   statm >> status;
   if (status == 'Y')
@@ -2417,6 +2505,32 @@ systemtap_session::explain_auto_options()
 		    "a compile-server.") << endl;
 	}
     }
+}
+
+bool
+systemtap_session::is_user_file (const string &name)
+{
+  // base the check on the name of the user_file
+  for (vector<stapfile*>::iterator it = user_files.begin(); it != user_files.end(); it++)
+    if (name == (*it)->name)
+      return true;
+  return false; // no match
+}
+
+bool
+systemtap_session::is_primary_probe (derived_probe *dp)
+{
+  // We check if this probe is from the primary user file by going back to its
+  // original probe and checking if that probe was found in the primary user
+  // file.
+
+  if (user_files.empty())
+    return false;
+
+  vector<probe*> chain;
+  dp->collect_derivation_chain (chain);
+  const source_loc& origin = chain.back()->tok->location;
+  return origin.file == user_files[0];
 }
 
 // --------------------------------------------------------------------------

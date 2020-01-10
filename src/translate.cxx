@@ -72,6 +72,7 @@ struct c_unparser: public unparser, public visitor
   unsigned tmpvar_counter;
   unsigned label_counter;
   unsigned action_counter;
+  bool already_checked_action_count;
 
   varuse_collecting_visitor vcv_needs_global_locks;
 
@@ -82,7 +83,7 @@ struct c_unparser: public unparser, public visitor
   c_unparser (systemtap_session* ss):
     session (ss), o (ss->op), current_probe(0), current_function (0),
     tmpvar_counter (0), label_counter (0), action_counter(0),
-    vcv_needs_global_locks (*ss) {}
+    already_checked_action_count(false), vcv_needs_global_locks (*ss) {}
   ~c_unparser () {}
 
   void emit_map_type_instantiations ();
@@ -102,6 +103,8 @@ struct c_unparser: public unparser, public visitor
   void emit_lock_decls (const varuse_collecting_visitor& v);
   void emit_locks ();
   void emit_probe (derived_probe* v);
+  void emit_probe_condition_initialize(derived_probe* v);
+  void emit_probe_condition_update(derived_probe* v);
   void emit_unlocks ();
 
   void emit_compiled_printfs ();
@@ -201,6 +204,7 @@ struct c_unparser: public unparser, public visitor
   void visit_stat_op (stat_op* e);
   void visit_hist_op (hist_op* e);
   void visit_cast_op (cast_op* e);
+  void visit_autocast_op (autocast_op* e);
   void visit_atvar_op (atvar_op* e);
   void visit_defined_op (defined_op* e);
   void visit_entry_op (entry_op* e);
@@ -864,6 +868,18 @@ public:
       return "_stp_map_iter (" + mv.value() + ", " + value() + ")";
   }
 
+  // Cannot handle deleting and iterating on pmaps
+  string del_next (mapvar const & mv) const
+  {
+    if (mv.type() != referent_ty)
+      throw SEMANTIC_ERROR(_("inconsistent iterator type in itervar::next()"));
+
+    if (mv.is_parallel())
+      throw SEMANTIC_ERROR(_("deleting a value of an unsupported map type"));
+    else
+      return "_stp_map_iterdel (" + mv.value() + ", " + value() + ")";
+  }
+
   string value () const
   {
     return "l->" + name;
@@ -918,6 +934,37 @@ ostream & operator<<(ostream & o, itervar const & v)
 
 // ------------------------------------------------------------------------
 
+struct unmodified_fnargs_checker : public embedded_tags_visitor
+{
+  bool embedded_seen; // excludes code with pure and unmodified-args
+  unmodified_fnargs_checker (): embedded_tags_visitor(true), embedded_seen(false) {}
+
+  void visit_embeddedcode (embeddedcode *e)
+    {
+      embedded_tags_visitor::visit_embeddedcode(e);
+      // set embedded_seen to true if it does not contain /* unmodified-fnargs */
+      embedded_seen = (embedded_seen || !tagged_p("/* unmodified-fnargs */"));
+    }
+};
+
+bool
+is_unmodified_string_fnarg (systemtap_session* sess, functiondecl* fd, vardecl* v)
+{
+  if (sess->unoptimized || v->type != pe_string)
+    return false;
+
+  // check that there is no embedded code that might modify the fn args
+  unmodified_fnargs_checker ecv;
+  fd->body->visit(& ecv);
+  if (ecv.embedded_seen)
+    return false;
+
+  varuse_collecting_visitor vut (*sess);
+  vut.current_function = fd;
+  fd->body->visit(& vut);
+  return (find(vut.written.begin(), vut.written.end(), v) == vut.written.end());
+}
+
 void
 c_unparser::emit_common_header ()
 {
@@ -956,7 +1003,7 @@ c_unparser::emit_common_header ()
       // That's because they're only dependent on the probe body, which is already
       // "hashed" in above.
 
-      if (tmp_probe_contents.count(oss.str()) == 0) // unique
+      if (session->unoptimized || tmp_probe_contents.count(oss.str()) == 0) // unique
         {
           tmp_probe_contents[oss.str()] = dp->name; // save it
 
@@ -1026,19 +1073,25 @@ c_unparser::emit_common_header ()
           vardecl* v = fd->formal_args[j];
 	  try
 	    {
+              v->char_ptr_arg = (is_unmodified_string_fnarg (session, fd, v));
+
+              if (v->char_ptr_arg && session->verbose > 2)
+                clog << _F("variable %s for function %s will be passed by reference (char *)",
+                           v->name.c_str(), fd->name.c_str()) << endl;
+
               if (fd->mangle_oldstyle)
                 {
                   // PR14524: retain old way of referring to the locals
                   o->newline() << "union { "
-                               << c_typename (v->type) << " "
-                               << c_localname (v->name) << "; "
-                               << c_typename (v->type) << " "
-                               << c_localname (v->name, true) << "; };";
+                               << (v->char_ptr_arg ? "const char *" : c_typename (v->type))
+                               << " " << c_localname (v->name) << "; "
+                               << (v->char_ptr_arg ? "const char *" : c_typename (v->type))
+                               << " " << c_localname (v->name, true) << "; };";
                 }
               else
                 {
-                  o->newline() << c_typename (v->type) << " "
-                               << c_localname (v->name) << ";";
+                  o->newline() << (v->char_ptr_arg ? "const char *" : c_typename (v->type))
+                               << " " << c_localname (v->name) << ";";
                 }
 	    } catch (const semantic_error& e) {
 	      semantic_error e2 (e);
@@ -1052,7 +1105,11 @@ c_unparser::emit_common_header ()
 	o->newline() << "/* no return value */";
       else
 	{
-	  o->newline() << c_typename (fd->type) << " __retvalue;";
+          if (!session->unoptimized && fd->type == pe_string&& session->verbose > 2)
+            clog << _F("return value for function %s will be passed by reference (char *)",
+                       fd->name.c_str()) << endl;
+	  o->newline() << (!session->unoptimized && fd->type == pe_string ? "char *" : c_typename (fd->type))
+                       << " __retvalue;";
 	}
       o->newline(-1) << "} " << c_funcname (fd->name) << ";";
     }
@@ -1082,6 +1139,46 @@ c_unparser::emit_common_header ()
   emit_map_type_instantiations ();
 
   emit_compiled_printfs();
+
+  if (!session->runtime_usermode_p())
+    {
+      // Updated in probe handlers to signal that a module refresh is needed.
+      // Checked and cleared by common epilogue after scheduling refresh work.
+      o->newline( 0)  << "static atomic_t need_module_refresh = ATOMIC_INIT(0);";
+
+      // We will use a workqueue to schedule module_refresh work when we need
+      // to enable/disable probes.
+      o->newline( 0)  << "#include <linux/workqueue.h>";
+      o->newline( 0)  << "static struct work_struct module_refresher_work;";
+      o->newline( 0)  << "#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)";
+      o->newline( 0)  << "static void module_refresher(void *data) {";
+      o->newline( 0)  << "#else";
+      o->newline( 0)  << "static void module_refresher(struct work_struct *work) {";
+      o->newline( 0)  << "#endif";
+      o->newline( 1)  <<    "systemtap_module_refresh(NULL);";
+      o->newline(-1)  << "}";
+
+      o->newline( 0)  << "#ifdef STP_ON_THE_FLY_TIMER_ENABLE";
+      o->newline( 0)  << "#include <linux/hrtimer.h>";
+      o->newline( 0)  << "#include \"timer.h\"";
+      o->newline( 0)  << "static struct hrtimer module_refresh_timer;";
+
+      o->newline( 0)  << "#ifndef STP_ON_THE_FLY_INTERVAL";
+      o->newline( 0)  << "#define STP_ON_THE_FLY_INTERVAL (100*1000*1000)"; // default to 100 ms
+      o->newline( 0)  << "#endif";
+
+      o->newline( 0)  << "hrtimer_return_t module_refresh_timer_cb(struct hrtimer *timer) {";
+      o->newline(+1)  <<   "if (atomic_cmpxchg(&need_module_refresh, 1, 0) == 1)";
+      // NB: one might like to invoke systemtap_module_refresh(NULL) directly from
+      // here ... however hrtimers are called from an unsleepable context, so no can do.
+      o->newline(+1)  <<     "schedule_work(&module_refresher_work);";
+      o->newline(-1)  <<   "hrtimer_set_expires(timer,";
+      o->newline( 0)  <<   "  ktime_add(hrtimer_get_expires(timer),";
+      o->newline( 0)  <<   "            ktime_set(0, STP_ON_THE_FLY_INTERVAL))); ";
+      o->newline( 0)  <<   "return HRTIMER_RESTART;";
+      o->newline(-1)  << "}";
+      o->newline( 0)  << "#endif /* STP_ON_THE_FLY_ENABLE */";
+    }
 
   o->newline();
 }
@@ -1819,6 +1916,20 @@ c_unparser::emit_module_init ()
       o->newline() << "if (rc) goto out;";
     }
 
+  if (!session->runtime_usermode_p())
+    {
+      // Initialize workqueue needed for on-the-fly arming/disarming
+      o->newline() << "#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)";
+      o->newline() << "INIT_WORK(&module_refresher_work, module_refresher, NULL);";
+      o->newline() << "#else";
+      o->newline() << "INIT_WORK(&module_refresher_work, module_refresher);";
+      o->newline() << "#endif";
+    }
+
+  // Initialize probe conditions
+  for (unsigned i=0; i<session->probes.size(); i++)
+    emit_probe_condition_initialize(session->probes[i]);
+
   // Run all probe registrations.  This actually runs begin probes.
 
   for (unsigned i=0; i<g.size(); i++)
@@ -1846,13 +1957,63 @@ c_unparser::emit_module_init ()
   o->newline() << "if (atomic_read (session_state()) == STAP_SESSION_STARTING)";
   // NB: only other valid state value is ERROR, in which case we don't
   o->newline(1) << "atomic_set (session_state(), STAP_SESSION_RUNNING);";
+  o->newline(-1);
 
   // Run all post-session starting code.
   for (unsigned i=0; i<g.size(); i++)
     {
       g[i]->emit_module_post_init (*session);
     }
-  o->newline(-1) << "return 0;";
+
+  if (!session->runtime_usermode_p())
+    {
+      o->newline() << "#ifdef STP_ON_THE_FLY_TIMER_ENABLE";
+
+      // Initialize hrtimer needed for on-the-fly arming/disarming
+      o->newline() << "hrtimer_init(&module_refresh_timer, CLOCK_MONOTONIC,";
+      o->newline() << "             HRTIMER_MODE_REL);";
+      o->newline() << "module_refresh_timer.function = &module_refresh_timer_cb;";
+
+      // We check here if it's worth it to start the timer at all. We only need
+      // the background timer if there is a probe which doesn't support directy
+      // scheduling work (otf_safe_context() == false), but yet does affect the
+      // condition of at least one probe which supports on-the-fly operations.
+      {
+        // for each derived probe...
+        bool start_timer = false;
+        for (unsigned i=0; i<session->probes.size() && !start_timer; i++)
+          {
+            // if it isn't safe in this probe type to directly schedule work,
+            // and this probe could affect other probes...
+            if (session->probes[i]->group
+                && !session->probes[i]->group->otf_safe_context(*session)
+                && !session->probes[i]->probes_with_affected_conditions.empty())
+              {
+                // and if any of those possible probes support on-the-fly operations,
+                // then we'll need the timer
+                for (set<derived_probe*>::const_iterator
+                      it  = session->probes[i]->probes_with_affected_conditions.begin();
+                      it != session->probes[i]->probes_with_affected_conditions.end()
+                            && !start_timer; ++it)
+                  {
+                    if ((*it)->group->otf_supported(*session))
+                      start_timer = true;
+                  }
+              }
+          }
+
+        if (start_timer)
+          {
+            o->newline() << "hrtimer_start(&module_refresh_timer,";
+            o->newline() << "              ktime_set(0, STP_ON_THE_FLY_INTERVAL),";
+            o->newline() << "              HRTIMER_MODE_REL);";
+          }
+      }
+
+      o->newline() << "#endif /* STP_ON_THE_FLY_TIMER_ENABLE */";
+    }
+
+  o->newline() << "return 0;";
 
   // Error handling path; by now all partially registered probe groups
   // have been unregistered.
@@ -1872,9 +2033,7 @@ c_unparser::emit_module_init ()
 
   // For any partially registered/unregistered kernel facilities.
   o->newline() << "atomic_set (session_state(), STAP_SESSION_STOPPED);";
-  o->newline() << "#ifdef STAPCONF_SYNCHRONIZE_SCHED";
-  o->newline() << "synchronize_sched();";
-  o->newline() << "#endif";
+  o->newline() << "stp_synchronize_sched();";
 
   // In case tracepoints were started, they need to be cleaned up
   o->newline() << "#ifdef STAP_NEED_TRACEPOINTS";
@@ -1897,17 +2056,37 @@ c_unparser::emit_module_init ()
 void
 c_unparser::emit_module_refresh ()
 {
-  o->newline() << "static void systemtap_module_refresh (void) {";
-  o->newline(1) << "int i=0, j=0;"; // for derived_probe_group use
+  o->newline() << "static void systemtap_module_refresh (const char *modname) {";
+  o->newline(1) << "int state;";
+  o->newline() << "int i=0, j=0;"; // for derived_probe_group use
+
+  if (!session->runtime_usermode_p())
+    {
+      o->newline() << "#if defined(STP_TIMING)";
+      o->newline() << "cycles_t cycles_atstart = get_cycles();";
+      o->newline() << "#endif";
+    }
+
+  // Ensure we're only doing the refreshing one at a time. NB: it's important
+  // that we get the lock prior to checking the session_state, in case whoever
+  // is holding the lock (e.g. systemtap_module_exit()) changes it.
+  if (!session->runtime_usermode_p())
+    o->newline() << "mutex_lock(&module_refresh_mutex);";
 
   /* If we're not in STARTING/RUNNING state, don't try doing any work.
      PR16766 */
-  o->newline() << "int state = atomic_read (session_state());";
+  o->newline() << "state = atomic_read (session_state());";
   o->newline() << "if (state != STAP_SESSION_RUNNING && state != STAP_SESSION_STARTING && state != STAP_SESSION_ERROR) {";
   // cannot _stp_warn etc. since we're not in probe context
   o->newline(1) << "#if defined(__KERNEL__)";
-  o->newline() << "printk (KERN_ERR \"stap module notifier triggered in unexpected state %d\", state);";
+  o->newline() << "if (state != STAP_SESSION_STOPPING)";
+  o->newline(1) << "printk (KERN_ERR \"stap module notifier triggered in unexpected state %d\\n\", state);";
+  o->indent(-1);
   o->newline() << "#endif";
+
+  if (!session->runtime_usermode_p())
+    o->newline() << "mutex_unlock(&module_refresh_mutex);";
+
   o->newline() << "return;";
   o->newline(-1) << "}";
 
@@ -1919,6 +2098,25 @@ c_unparser::emit_module_refresh ()
     {
       g[i]->emit_module_refresh (*session);
     }
+
+  if (!session->runtime_usermode_p())
+    {
+      // see also common_probe_entryfn_epilogue()
+      o->newline() << "#if defined(STP_TIMING)";
+      o->newline() << "if (likely(g_refresh_timing)) {";
+      o->newline(1) << "cycles_t cycles_atend = get_cycles ();";
+      o->newline() << "int32_t cycles_elapsed = ((int32_t)cycles_atend > (int32_t)cycles_atstart)";
+      o->newline(1) << "? ((int32_t)cycles_atend - (int32_t)cycles_atstart)";
+      o->newline() << ": (~(int32_t)0) - (int32_t)cycles_atstart + (int32_t)cycles_atend + 1;";
+      o->indent(-1);
+      o->newline() << "_stp_stat_add(g_refresh_timing, cycles_elapsed);";
+      o->newline(-1) << "}";
+      o->newline() << "#endif";
+    }
+
+  if (!session->runtime_usermode_p())
+    o->newline() << "mutex_unlock(&module_refresh_mutex);";
+
   o->newline(-1) << "}\n";
 }
 
@@ -1946,6 +2144,22 @@ c_unparser::emit_module_exit ()
   // while to abort right away.  Currently running probes are allowed to
   // terminate.  These may set STAP_SESSION_ERROR!
 
+  if (!session->runtime_usermode_p())
+    {
+      o->newline() << "#ifdef STP_ON_THE_FLY_TIMER_ENABLE";
+      o->newline() << "hrtimer_cancel(&module_refresh_timer);";
+      o->newline() << "#endif";
+    }
+
+  // cargo cult prologue ... hope to flush any pending workqueue items too
+  o->newline() << "stp_synchronize_sched();";
+
+  // Get the lock before exiting to ensure there's no one in module_refresh
+  // NB: this should't be able to happen, because both the module_refresh_timer
+  // and the workqueue ought to have been shut down by now.
+  if (!session->runtime_usermode_p())
+    o->newline() << "mutex_lock(&module_refresh_mutex);";
+
   // We're processing the derived_probe_group list in reverse
   // order.  This ensures that probes get unregistered in reverse
   // order of the way they were registered.
@@ -1954,13 +2168,14 @@ c_unparser::emit_module_exit ()
        i != g.rend(); i++)
     (*i)->emit_module_exit (*session); // NB: runs "end" probes
 
+  if (!session->runtime_usermode_p())
+    o->newline() << "mutex_unlock(&module_refresh_mutex);";
+
   // But some other probes may have launched too during unregistration.
   // Let's wait a while to make sure they're all done, done, done.
 
   // cargo cult prologue
-  o->newline() << "#ifdef STAPCONF_SYNCHRONIZE_SCHED";
-  o->newline() << "synchronize_sched();";
-  o->newline() << "#endif";
+  o->newline() << "stp_synchronize_sched();";
 
   // NB: systemtap_module_exit is assumed to be called from ordinary
   // user context, say during module unload.  Among other things, this
@@ -1969,9 +2184,7 @@ c_unparser::emit_module_exit ()
 
   // cargo cult epilogue
   o->newline() << "atomic_set (session_state(), STAP_SESSION_STOPPED);";
-  o->newline() << "#ifdef STAPCONF_SYNCHRONIZE_SCHED";
-  o->newline() << "synchronize_sched();";
-  o->newline() << "#endif";
+  o->newline() << "stp_synchronize_sched();";
 
   // XXX: might like to have an escape hatch, in case some probe is
   // genuinely stuck somehow
@@ -2041,6 +2254,24 @@ c_unparser::emit_module_exit ()
   o->newline(-1) << "}";
   o->newline() << "#endif"; // STP_TIMING
   o->newline(-1) << "}";
+
+  if (!session->runtime_usermode_p())
+    {
+      o->newline() << "#if defined(STP_TIMING)";
+      o->newline() << "_stp_printf(\"----- refresh report:\\n\");";
+      o->newline() << "if (likely (g_refresh_timing)) {";
+      o->newline(1) << "struct stat_data *stats = _stp_stat_get (g_refresh_timing, 0);";
+      o->newline() << "if (stats->count) {";
+      o->newline(1) << "int64_t avg = _stp_div64 (NULL, stats->sum, stats->count);";
+      o->newline() << "_stp_printf (\"hits: %lld, cycles: %lldmin/%lldavg/%lldmax\\n\",";
+      o->newline(2) << "(long long) stats->count, (long long) stats->min, ";
+      o->newline() <<  "(long long) avg, (long long) stats->max);";
+      o->newline(-3) << "}";
+      o->newline() << "_stp_stat_del (g_refresh_timing);";
+      o->newline(-1) << "}";
+      o->newline() << "#endif"; // STP_TIMING
+    }
+
   o->newline() << "_stp_print_flush();";
   o->newline() << "#endif";
 
@@ -2090,6 +2321,57 @@ c_unparser::emit_module_exit ()
   o->newline(-1) << "}\n";
 }
 
+struct max_action_info: public functioncall_traversing_visitor
+{
+  max_action_info(systemtap_session& s): sess(s), statement_count(0) {}
+
+  systemtap_session& sess;
+  unsigned statement_count;
+  static const unsigned max_statement_count = ~0;
+
+  void add_stmt_count (unsigned val)
+    {
+      statement_count = (statement_count > max_statement_count - val) ? max_statement_count : statement_count + val;
+    }
+  void add_max_stmt_count () { statement_count = max_statement_count; }
+  bool statement_count_finite() { return statement_count < max_statement_count; }
+
+  void visit_for_loop (for_loop* stmt) { add_max_stmt_count(); }
+  void visit_foreach_loop (foreach_loop* stmt) { add_max_stmt_count(); }
+  void visit_expr_statement (expr_statement *stmt)
+    {
+      add_stmt_count(1);
+      traversing_visitor::visit_expr_statement(stmt); // which will trigger visit_functioncall, if applicable
+    }
+  void visit_if_statement (if_statement *stmt)
+    {
+      add_stmt_count(1);
+      stmt->condition->visit(this);
+
+      // Create new visitors for the two forks.  Copy the nested[] set
+      // to prevent infinite recursion for a   function f () { if (a) f() }
+      max_action_info tmp_visitor_then (*this);
+      max_action_info tmp_visitor_else (*this);
+      stmt->thenblock->visit(& tmp_visitor_then);
+      if (stmt->elseblock)
+        {
+          stmt->elseblock->visit(& tmp_visitor_else);
+        }
+
+      // Simply overwrite our copy of statement_count, since these
+      // visitor copies already included our starting count.
+      statement_count = max(tmp_visitor_then.statement_count, tmp_visitor_else.statement_count);
+    }
+
+  void note_recursive_functioncall (functioncall *e) { add_max_stmt_count(); }
+
+  void visit_null_statement (null_statement *stmt) { add_stmt_count(1); }
+  void visit_return_statement (return_statement *stmt) { add_stmt_count(1); }
+  void visit_delete_statement (delete_statement *stmt) { add_stmt_count(1); }
+  void visit_next_statement (next_statement *stmt) { add_stmt_count(1); }
+  void visit_break_statement (break_statement *stmt) { add_stmt_count(1); }
+  void visit_continue_statement (continue_statement *stmt) { add_stmt_count(1); }
+};
 
 void
 c_unparser::emit_function (functiondecl* v)
@@ -2101,6 +2383,7 @@ c_unparser::emit_function (functiondecl* v)
   this->current_function = v;
   this->tmpvar_counter = 0;
   this->action_counter = 0;
+  this->already_checked_action_count = false;
 
   o->newline() << "__label__ out;";
   o->newline()
@@ -2175,6 +2458,18 @@ c_unparser::emit_function (functiondecl* v)
 
   o->newline() << "#define STAP_ERROR(...) do { snprintf(CONTEXT->error_buffer, MAXSTRINGLEN, __VA_ARGS__); CONTEXT->last_error = CONTEXT->error_buffer; goto out; } while (0)";
   o->newline() << "#define return goto out"; // redirect embedded-C return
+
+  max_action_info mai (*session);
+  v->body->visit (&mai);
+
+  if (mai.statement_count_finite() && !session->suppress_time_limits
+      && !session->unoptimized) // this is a finite-statement-count function
+    {
+      o->newline() << "if (c->actionremaining < " << mai.statement_count
+                   << ") { c->last_error = " << STAP_T_04 << "goto out; }";
+      this->already_checked_action_count = true;
+    }
+
   v->body->visit (this);
   o->newline() << "#undef return";
   o->newline() << "#undef STAP_ERROR";
@@ -2201,8 +2496,9 @@ c_unparser::emit_function (functiondecl* v)
   }
   o->newline() << "#undef STAP_RETVALUE";
   o->newline(-1) << "}\n";
-}
 
+  this->already_checked_action_count = false;
+}
 
 #define DUPMETHOD_CALL 0
 #define DUPMETHOD_ALIAS 0
@@ -2215,6 +2511,7 @@ c_unparser::emit_probe (derived_probe* v)
   this->current_probe = v;
   this->tmpvar_counter = 0;
   this->action_counter = 0;
+  this->already_checked_action_count = false;
 
   // If we about to emit a probe that is exactly the same as another
   // probe previously emitted, make the second probe just call the
@@ -2245,7 +2542,7 @@ c_unparser::emit_probe (derived_probe* v)
 
   // If an identical probe has already been emitted, just call that
   // one.
-  if (probe_contents.count(oss.str()) != 0)
+  if (!session->unoptimized && probe_contents.count(oss.str()) != 0)
     {
       string dupe = probe_contents[oss.str()];
 
@@ -2292,6 +2589,22 @@ c_unparser::emit_probe (derived_probe* v)
         {
           varuse_collecting_visitor vut(*session);
           v->body->visit (& vut);
+
+          // also visit any probe conditions which this current probe might
+          // evaluate so that read locks are emitted as necessary: e.g. suppose
+          //    probe X if (a || b) {...} probe Y {a = ...} probe Z {b = ...}
+          // then Y and Z will already write-lock a and b respectively, but they
+          // also need a read-lock on b and a respectively, since they will read
+          // them when evaluating the new cond_enabled field (see c_unparser::
+          // emit_probe_condition_update()).
+          for (set<derived_probe*>::const_iterator
+                it  = v->probes_with_affected_conditions.begin();
+                it != v->probes_with_affected_conditions.end(); ++it)
+            {
+              assert((*it)->sole_location()->condition != NULL);
+              (*it)->sole_location()->condition->visit (& vut);
+            }
+
           emit_lock_decls (vut);
         }
 
@@ -2334,6 +2647,20 @@ c_unparser::emit_probe (derived_probe* v)
 
       v->initialize_probe_context_vars (o);
 
+      max_action_info mai (*session);
+      v->body->visit (&mai);
+      if (session->verbose > 1)
+        clog << _F("%d statements for probe %s", mai.statement_count, v->name.c_str()) << endl;
+
+      if (mai.statement_count_finite() && !session->suppress_time_limits
+          && !session->unoptimized) // this is a finite-statement-count probe
+        {
+          o->newline() << "if (c->actionremaining < " << mai.statement_count 
+                       << ") { c->last_error = " << STAP_T_04 << " goto out; }";
+          this->already_checked_action_count = true;
+        }
+
+
       v->body->visit (this);
 
       record_actions(0, v->body->tok, true);
@@ -2343,6 +2670,15 @@ c_unparser::emit_probe (derived_probe* v)
       // someday be local
 
       o->indent(1);
+
+      if (!v->probes_with_affected_conditions.empty())
+        {
+          for (set<derived_probe*>::const_iterator
+                it  = v->probes_with_affected_conditions.begin();
+                it != v->probes_with_affected_conditions.end(); ++it)
+            emit_probe_condition_update(*it);
+        }
+
       if (v->needs_global_locks ())
 	emit_unlocks ();
 
@@ -2354,8 +2690,60 @@ c_unparser::emit_probe (derived_probe* v)
 
 
   this->current_probe = 0;
+  this->already_checked_action_count = false;
 }
 
+// Initializes the cond_enabled field by evaluating condition predicate.
+void
+c_unparser::emit_probe_condition_initialize(derived_probe* v)
+{
+  unsigned i = v->session_index;
+  assert(i < session->probes.size());
+
+  expression *cond = v->sole_location()->condition;
+  string cond_enabled = "stap_probes[" + lex_cast(i) + "].cond_enabled";
+
+  // no condition --> always enabled (initialized via STAP_PROBE_INIT)
+  if (!cond)
+    return;
+
+  // turn general integer into boolean 0/1
+  o->newline() << cond_enabled << " = !!";
+  cond->visit(this);
+  o->line() << ";";
+}
+
+// Updates the cond_enabled field and sets need_module_refresh if it was
+// changed.
+void
+c_unparser::emit_probe_condition_update(derived_probe* v)
+{
+  unsigned i = v->session_index;
+  assert(i < session->probes.size());
+
+  expression *cond = v->sole_location()->condition;
+  assert(cond);
+
+  string cond_enabled = "stap_probes[" + lex_cast(i) + "].cond_enabled";
+
+  // Concurrency note: we're safe modifying cond_enabled here since we emit
+  // locks not only for globals we write to, but also for globals read in other
+  // probes' whose conditions we visit below (see in c_unparser::emit_probe). So
+  // we can be assured we're the only ones modifying cond_enabled.
+
+  o->newline() << "if (" << cond_enabled << " != ";
+  o->line() << "!!"; // NB: turn general integer into boolean 1 or 0
+  v->sole_location()->condition->visit(this);
+  o->line() << ") {";
+  o->newline(1) << cond_enabled << " ^= 1;"; // toggle it 
+
+  // don't bother refreshing if on-the-fly not supported
+  if (!session->runtime_usermode_p()
+      && v->group && v->group->otf_supported(*session))
+    o->newline() << "atomic_set(&need_module_refresh, 1);";
+
+  o->newline(-1) << "}";
+}
 
 void
 c_unparser::emit_lock_decls(const varuse_collecting_visitor& vut)
@@ -2363,7 +2751,8 @@ c_unparser::emit_lock_decls(const varuse_collecting_visitor& vut)
   unsigned numvars = 0;
 
   if (session->verbose > 1)
-    clog << "probe " << *current_probe->sole_location() << " locks ";
+    clog << "probe " << current_probe->session_index << " "
+            "('" << *current_probe->sole_location() << "') locks";
 
   // We can only make this static in kernel mode.  In stapdyn mode,
   // the globals and their locks are in shared memory.
@@ -2414,8 +2803,8 @@ c_unparser::emit_lock_decls(const varuse_collecting_visitor& vut)
 
       numvars ++;
       if (session->verbose > 1)
-        clog << v->name << "[" << (read_p ? "r" : "")
-             << (write_p ? "w" : "")  << "] ";
+        clog << " " << v->name << "[" << (read_p ? "r" : "")
+             << (write_p ? "w" : "")  << "]";
     }
 
   o->newline(-1) << "};";
@@ -2423,7 +2812,7 @@ c_unparser::emit_lock_decls(const varuse_collecting_visitor& vut)
   if (session->verbose > 1)
     {
       if (!numvars)
-        clog << _("nothing");
+        clog << _(" nothing");
       clog << endl;
     }
 }
@@ -2676,6 +3065,26 @@ c_unparser::c_assign (var& lvalue, const string& rvalue, const token *tok)
     }
 }
 
+
+struct expression_is_functioncall : public expression_visitor
+{
+  c_unparser* parent;
+  functioncall* fncall;
+  expression_is_functioncall (c_unparser* p)
+    : parent(p), fncall(NULL) {}
+
+  void visit_expression (expression* e)
+    {
+      // works on the basis that every expression will, by default, call this
+      // function, except for functioncall, as the visitor is overwritten
+      fncall = NULL;
+    }
+  void visit_functioncall (functioncall* e)
+    {
+      fncall = e;
+    }
+};
+
 void
 c_unparser::c_assign (const string& lvalue, expression* rvalue,
 		      const string& msg)
@@ -2688,7 +3097,22 @@ c_unparser::c_assign (const string& lvalue, expression* rvalue,
     }
   else if (rvalue->type == pe_string)
     {
-      c_strcpy (lvalue, rvalue);
+      expression_is_functioncall eif (this);
+      rvalue->visit(& eif);
+      if (!session->unoptimized && eif.fncall)
+        {
+          // let the functioncall know that the return value is being saved/used
+          // and keep track of the lvalue, so that the retval assignment can
+          // happen in ::visit_functioncall, to avoid complications with nesting.
+          eif.fncall->var_assigned_to_retval = lvalue;
+          eif.fncall->visit (this);
+          o->line() << ";";
+        }
+      else
+        {
+          // will call rvalue->visit()
+          c_strcpy (lvalue, rvalue);
+        }
     }
   else
     {
@@ -2985,8 +3409,10 @@ c_unparser::record_actions (unsigned actions, const token* tok, bool update)
 
   // Update if needed, or after queueing up a few actions, in case of very
   // large code sequences.
-  if (((update && action_counter > 0) || action_counter >= 10/*<-arbitrary*/) && !session->suppress_time_limits)
+  if (((update && action_counter > 0) || action_counter >= 10/*<-arbitrary*/)
+    && !session->suppress_time_limits && !already_checked_action_count)
     {
+
       o->newline() << "c->actionremaining -= " << action_counter << ";";
       o->newline() << "if (unlikely (c->actionremaining <= 0)) {";
       o->newline(1) << "c->last_error = ";
@@ -3325,10 +3751,34 @@ c_tmpcounter::visit_foreach_loop (foreach_loop *s)
   hist_op *hist;
   classify_indexable (s->base, array, hist);
 
+  // Create a temporary for the loop limit counter and the limit
+  // expression result.
+  if (s->limit)
+    {
+      tmpvar res_limit = parent->gensym (pe_long);
+      res_limit.declare(*parent);
+
+      s->limit->visit (this);
+
+      tmpvar limitv = parent->gensym (pe_long);
+      limitv.declare(*parent);
+    }
+
   if (array)
     {
       itervar iv = parent->getiter (array);
       parent->o->newline() << iv.declare();
+
+      // Create temporaries for the array slice indexes that aren't wildcards
+      for (unsigned i=0; i<s->array_slice.size(); i++)
+        {
+          if (s->array_slice[i])
+            {
+              tmpvar slice_index = parent->gensym (s->array_slice[i]->type);
+              slice_index.declare(*parent);
+              s->array_slice[i]->visit (this);
+            }
+        }
     }
   else
    {
@@ -3351,19 +3801,6 @@ c_tmpcounter::visit_foreach_loop (foreach_loop *s)
       load_aggregate (hist->stat);
     }
 
-  // Create a temporary for the loop limit counter and the limit
-  // expression result.
-  if (s->limit)
-    {
-      tmpvar res_limit = parent->gensym (pe_long);
-      res_limit.declare(*parent);
-
-      s->limit->visit (this);
-
-      tmpvar limitv = parent->gensym (pe_long);
-      limitv.declare(*parent);
-    }
-
   parent->visit_foreach_loop_value(this, s);
 }
 
@@ -3382,7 +3819,6 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
   if (array)
     {
       mapvar mv = getmap (array->referent, s->tok);
-      itervar iv = getiter (array);
       vector<var> keys;
 
       // NB: structure parallels for_loop
@@ -3468,10 +3904,6 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
 
       // NB: sort direction sense is opposite in runtime, thus the negation
 
-      if (mv.is_parallel())
-	aggregations_active.insert(mv.value());
-      o->newline() << iv << " = " << iv.start (mv) << ";";
-
       tmpvar *limitv = NULL;
       if (s->limit)
       {
@@ -3479,6 +3911,28 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
 	  limitv = new tmpvar(gensym (pe_long));
 	  o->newline() << *limitv << " = 0LL;";
       }
+
+      if (mv.is_parallel())
+	aggregations_active.insert(mv.value());
+
+      itervar iv = getiter (array);
+      o->newline() << iv << " = " << iv.start (mv) << ";";
+
+      vector<tmpvar *> array_slice_vars;
+      // store the the variables corresponding to the index of the array slice
+      // as temporary variables
+      if (!s->array_slice.empty())
+          for (unsigned i = 0; i < s->array_slice.size(); ++i)
+            {
+              if (s->array_slice[i])
+                {
+                  tmpvar *asvar = new tmpvar(gensym(s->array_slice[i]->type));
+                  c_assign(asvar->value(), s->array_slice[i], "array slice index");
+                  array_slice_vars.push_back(asvar);
+                }
+              else
+                array_slice_vars.push_back(NULL);
+            }
 
       record_actions(1, s->tok, true);
 
@@ -3517,6 +3971,42 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
 	  c_assign (v, iv.get_key (mv, v.type(), i), s->tok);
 	}
 
+      // in the case that the user specified something like
+      // foreach ([a,b] in foo[*, 123]), need to check that it iterates over
+      // the specified values, ie b is alwasy going to be 123
+      if (!s->array_slice.empty())
+        {
+          //add in the beginning portion of the if statement
+          o->newline() << "if (0"; // in case all are wildcards
+          for (unsigned i = 0; i < s->array_slice.size(); ++i)
+
+            // only output a comparsion if the expression is not "*".
+            if (s->array_slice[i])
+            {
+              o->line() << " || ";
+              if (s->indexes[i]->type == pe_string)
+                {
+                  if (s->array_slice[i]->type != pe_string)
+                    throw SEMANTIC_ERROR (_("expected string types"), s->tok);
+                  o->line() << "strncmp(" << getvar (s->indexes[i]->referent)
+                            << ", " << *array_slice_vars[i];
+                  o->line() << ", MAXSTRINGLEN) !=0";
+                }
+              else if (s->indexes[i]->type == pe_long)
+                {
+                  if (s->array_slice[i]->type != pe_long)
+                    throw SEMANTIC_ERROR (_("expected numeric types"), s->tok);
+                  o->line() << getvar (s->indexes[i]->referent) << " != "
+                            << *array_slice_vars[i];
+                }
+              else
+              {
+                  throw SEMANTIC_ERROR (_("unexpected type"), s->tok);
+              }
+            }
+          o->line() << ") goto " << contlabel << ";"; // end of the if statment
+        }
+
       if (s->value)
         {
 	  var v = getvar (s->value->referent);
@@ -3546,12 +4036,6 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
       // Iterating over buckets in a histogram.
       assert(s->indexes.size() == 1);
       assert(s->indexes[0]->referent->type == pe_long);
-      var bucketvar = getvar (s->indexes[0]->referent);
-
-      aggvar agg = gensym_aggregate ();
-
-      var *v = load_aggregate(hist->stat, agg);
-      v->assert_hist_compatible(*hist);
 
       tmpvar *res_limit = NULL;
       tmpvar *limitv = NULL;
@@ -3565,6 +4049,13 @@ c_unparser::visit_foreach_loop (foreach_loop *s)
 	  limitv = new tmpvar(gensym (pe_long));
 	  o->newline() << *limitv << " = 0LL;";
 	}
+
+      var bucketvar = getvar (s->indexes[0]->referent);
+
+      aggvar agg = gensym_aggregate ();
+
+      var *v = load_aggregate(hist->stat, agg);
+      v->assert_hist_compatible(*hist);
 
       record_actions(1, s->tok, true);
       o->newline() << "for (" << bucketvar << " = 0; "
@@ -3707,13 +4198,31 @@ delete_statement_operand_tmp_visitor::visit_arrayindex (arrayindex* e)
     {
       assert (array->referent != 0);
       vardecl* r = array->referent;
+      bool array_slice = false;
+
+      for (unsigned i = 0; i < e->indexes.size(); i ++)
+        if (e->indexes[i] == NULL)
+          {
+            array_slice = true;
+            break;
+          }
+
+      if (array_slice)
+        {
+          itervar iv = parent->parent->getiter(array);
+          parent->parent->o->newline() << iv.declare();
+        }
 
       // One temporary per index dimension.
       for (unsigned i=0; i<r->index_types.size(); i++)
 	{
-	  tmpvar ix = parent->parent->gensym (r->index_types[i]);
-	  ix.declare (*(parent->parent));
-	  e->indexes[i]->visit(parent);
+          if (array->referent->type  == pe_stats || !array_slice || e->indexes[i])
+            {
+	      tmpvar ix = parent->parent->gensym (r->index_types[i]);
+	      ix.declare (*(parent->parent));
+              if (e->indexes[i])
+	        e->indexes[i]->visit(parent);
+            }
 	}
     }
   else
@@ -3731,13 +4240,118 @@ delete_statement_operand_visitor::visit_arrayindex (arrayindex* e)
 
   if (array)
     {
-      vector<tmpvar> idx;
-      parent->load_map_indices (e, idx);
+      bool array_slice = false;
+      for (unsigned i = 0; i < e->indexes.size(); i ++)
+        if (e->indexes[i] == NULL)
+          {
+            array_slice = true;
+            break;
+          }
 
-      {
-	mapvar mvar = parent->getmap (array->referent, e->tok);
-	parent->o->newline() << mvar.del (idx) << ";";
-      }
+      if (!array_slice) // delete a single element
+        {
+          vector<tmpvar> idx;
+          parent->load_map_indices (e, idx);
+          mapvar mvar = parent->getmap (array->referent, e->tok);
+          parent->o->newline() << mvar.del (idx) << ";";
+        }
+      else // delete elements if they match the array slice.
+        {
+          vardecl* r = array->referent;
+          mapvar mvar = parent->getmap (r, e->tok);
+          itervar iv = parent->getiter(array);
+
+          // create tmpvars for the array indexes, storing NULL where there is
+          // no specific value that the index should be
+          vector<tmpvar *> array_slice_vars;
+          vector<tmpvar> idx; // for the indexes if the variable is a pmap
+          for (unsigned i=0; i<e->indexes.size(); i++)
+            {
+              if (e->indexes[i])
+                {
+                  tmpvar *asvar = new tmpvar(parent->gensym(e->indexes[i]->type));
+                  parent->c_assign (asvar->value(), e->indexes[i], "tmp var");
+                  array_slice_vars.push_back(asvar);
+                  if (mvar.is_parallel())
+                    idx.push_back(*asvar);
+                }
+              else
+                {
+                  array_slice_vars.push_back(NULL);
+                  if (mvar.is_parallel())
+                    {
+                      tmpvar *asvar = new tmpvar(parent->gensym(r->index_types[i]));
+                      idx.push_back(*asvar);
+                    }
+                }
+            }
+
+          if (mvar.is_parallel())
+            {
+              parent->o->newline() << "if (unlikely(NULL == "
+                                   << mvar.calculate_aggregate() << ")) {";
+              parent->o->newline(1) << "c->last_error = ";
+              parent->o->line() << STAP_T_05 << mvar << "\";";
+              parent->o->newline() << "c->last_stmt = "
+                                   << lex_cast_qstring(*e->tok) << ";";
+              parent->o->newline() << "goto out;";
+              parent->o->newline(-1) << "}";
+            }
+
+          // iterate through the map, deleting elements that match the array slice
+          string ctr = lex_cast (parent->label_counter++);
+          string toplabel = "top_" + ctr;
+          string breaklabel = "break_" + ctr;
+
+          parent->o->newline() << iv << " = " << iv.start(mvar) << ";";
+          parent->o->newline() << toplabel << ":";
+
+          parent->o->newline(1) << "if (!(" << iv << ")){";
+          parent->o->newline(1) << "goto " << breaklabel << ";}";
+
+          // insert the comparison for keys that aren't wildcards
+          parent->o->newline(-1) << "if (1"; // in case all are wildcards
+          for (unsigned i=0; i<array_slice_vars.size(); i++)
+            if (array_slice_vars[i] != NULL)
+              {
+              if (array_slice_vars[i]->type() == pe_long)
+                parent->o->line() << " && " << *array_slice_vars[i] << " == "
+                                  << iv.get_key(mvar, array_slice_vars[i]->type(), i);
+              else if (array_slice_vars[i]->type() == pe_string)
+                parent->o->line() << " && strncmp(" << *array_slice_vars[i] << ", "
+                                  << iv.get_key(mvar, array_slice_vars[i]->type(), i)
+                                  << ", MAXSTRINGLEN) == 0";
+              else
+                throw SEMANTIC_ERROR (_("unexpected type"), e->tok);
+              }
+
+          parent->o->line() <<  ") {";
+
+          // conditional is true, so delete item and go to the next item
+          if (mvar.is_parallel())
+            {
+              parent->o->indent(1);
+              // fills in the wildcards with the current iteration's (map) indexes
+              for (unsigned i = 0; i<array_slice_vars.size(); i++)
+                if (array_slice_vars[i] == NULL)
+                  parent->c_assign (idx[i].value(),
+                                    iv.get_key(mvar, r->index_types[i], i),
+                                    r->index_types[i], "tmpvar", e->tok);
+              parent->o->newline() << iv << " = " << iv.next(mvar) << ";";
+              parent->o->newline() << mvar.del(idx) << ";";
+            }
+          else
+            parent->o->newline(1) << iv << " = " << iv.del_next(mvar) << ";";
+
+          parent->o->newline(-1) << "} else";
+          parent->o->newline(1) << iv << " = " << iv.next(mvar) << ";";
+
+          parent->o->newline(-1) << "goto " << toplabel << ";";
+
+          parent->o->newline(-1) << breaklabel<< ":";
+          parent->o->newline(1) << "; /* dummy statement */";
+          parent->o->indent(-1);
+        }
     }
   else
     {
@@ -4004,18 +4618,35 @@ c_tmpcounter::visit_array_in (array_in* e)
     {
       assert (array->referent != 0);
       vardecl* r = array->referent;
-
-      // One temporary per index dimension.
-      for (unsigned i=0; i<r->index_types.size(); i++)
-	{
-	  tmpvar ix = parent->gensym (r->index_types[i]);
-	  ix.declare (*parent);
-	  e->operand->indexes[i]->visit(this);
-	}
+      bool array_slice = false;
 
       // A boolean result.
       tmpvar res = parent->gensym (e->type);
       res.declare (*parent);
+
+      for (unsigned i = 0; i < e->operand->indexes.size(); i ++)
+        if (e->operand->indexes[i] == NULL)
+          {
+            array_slice = true;
+            break;
+          }
+
+      // One temporary per index dimension.
+      for (unsigned i=0; i<r->index_types.size(); i++)
+	{
+	  if (!array_slice || e->operand->indexes[i])
+            {
+              tmpvar ix = parent->gensym (r->index_types[i]);
+              ix.declare (*parent);
+              e->operand->indexes[i]->visit(this);
+            }
+	}
+
+      if (array_slice)
+        {
+          itervar iv = parent->getiter(array);
+          parent->o->newline() << iv.declare();
+        }
     }
   else
     {
@@ -4042,15 +4673,108 @@ c_unparser::visit_array_in (array_in* e)
     {
       stmt_expr block(*this);
 
-      vector<tmpvar> idx;
-      load_map_indices (e->operand, idx);
-      // o->newline() << "c->last_stmt = " << lex_cast_qstring(*e->tok) << ";";
-
       tmpvar res = gensym (pe_long);
-      mapvar mvar = getmap (array->referent, e->tok);
-      c_assign (res, mvar.exists(idx), e->tok);
+      vector<tmpvar> idx;
 
-      o->newline() << res << ";";
+      // determine if the array index contains an asterisk
+      bool array_slice = false;
+      for (unsigned i = 0; i < e->operand->indexes.size(); i ++)
+        if (e->operand->indexes[i] == NULL)
+          {
+            array_slice = true;
+            break;
+          }
+
+      if (!array_slice) // checking for membership of a specific element
+        {
+          load_map_indices (e->operand, idx);
+          // o->newline() << "c->last_stmt = " << lex_cast_qstring(*e->tok) << ";";
+
+          mapvar mvar = getmap (array->referent, e->tok);
+          c_assign (res, mvar.exists(idx), e->tok);
+
+          o->newline() << res << ";";
+        }
+      else
+        {
+          // create tmpvars for the array indexes, storing NULL where there is
+          // no specific value that the index should be
+          vector<tmpvar *> array_slice_vars;
+          for (unsigned i=0; i<e->operand->indexes.size(); i++)
+            {
+              if (e->operand->indexes[i])
+                {
+                  tmpvar *asvar = new tmpvar(gensym(e->operand->indexes[i]->type));
+                  c_assign (asvar->value(), e->operand->indexes[i], "tmp var");
+                  array_slice_vars.push_back(asvar);
+                }
+              else
+                array_slice_vars.push_back(NULL);
+            }
+
+          mapvar mvar = getmap (array->referent, e->operand->tok);
+          itervar iv = getiter(array);
+          vector<tmpvar> idx;
+
+          // we may not need to aggregate if we're already in a foreach
+          bool pre_agg = (aggregations_active.count(mvar.value()) > 0);
+          if (mvar.is_parallel() && !pre_agg)
+            {
+              o->newline() << "if (unlikely(NULL == "
+                           << mvar.calculate_aggregate() << ")) {";
+              o->newline(1) << "c->last_error = ";
+              o->line() << STAP_T_05 << mvar << "\";";
+              o->newline() << "c->last_stmt = " << lex_cast_qstring(*e->tok) << ";";
+              o->newline() << "goto out;";
+              o->newline(-1) << "}";
+            }
+
+          string ctr = lex_cast (label_counter++);
+          string toplabel = "top_" + ctr;
+          string contlabel = "continue_" + ctr;
+          string breaklabel = "break_" + ctr;
+
+          o->newline() << iv << " = " << iv.start(mvar) << ";";
+          c_assign (res, "0", e->tok); // set the default to 0
+
+          o->newline() << toplabel << ":";
+
+          o->newline(1) << "if (!(" << iv << "))";
+          o->newline(1) << "goto " << breaklabel << ";";
+
+          // generate code for comparing the keys to the index slice
+          o->newline(-1) << "if (1"; // in case all are wildcards
+          for (unsigned i=0; i<array_slice_vars.size(); i++)
+            {
+              if (array_slice_vars[i] != NULL)
+                {
+                if (array_slice_vars[i]->type() == pe_long)
+                  o->line() << " && " << *array_slice_vars[i] << " == "
+                            << iv.get_key(mvar, array_slice_vars[i]->type(), i);
+                else if (array_slice_vars[i]->type() == pe_string)
+                  o->line() << " && strncmp(" << *array_slice_vars[i] << ", "
+                            << iv.get_key(mvar, array_slice_vars[i]->type(), i)
+                            << ", MAXSTRINGLEN) == 0";
+                else
+                  throw SEMANTIC_ERROR (_("unexpected type"), e->tok);
+                }
+            }
+          o->line() <<  "){";
+          o->indent(1);
+          // conditional is true, so set res and go to break
+          c_assign (res, "1", e->tok);
+          o->newline() << "goto " << breaklabel << ";";
+          o->newline(-1) << "}";
+
+          // else, keep iterating
+          o->newline() << iv << " = " << iv.next(mvar) << ";";
+          o->newline() << "goto " << toplabel << ";";
+
+          o->newline(-1) << breaklabel<< ":";
+          o->newline(1) << "; /* dummy statement */";
+          o->newline(-1) << res << ";";
+        }
+
     }
   else
     {
@@ -4421,6 +5145,13 @@ void
 c_unparser::visit_cast_op (cast_op* e)
 {
   throw SEMANTIC_ERROR(_("cannot translate general @cast expression"), e->tok);
+}
+
+
+void
+c_unparser::visit_autocast_op (autocast_op* e)
+{
+  throw SEMANTIC_ERROR(_("cannot translate general dereference expression"), e->tok);
 }
 
 
@@ -4882,6 +5613,7 @@ c_tmpcounter::visit_functioncall (functioncall *e)
 {
   assert (e->referent != 0);
   functiondecl* r = e->referent;
+
   // one temporary per argument, unless literal numbers or strings
   for (unsigned i=0; i<r->formal_args.size(); i++)
     {
@@ -4891,6 +5623,10 @@ c_tmpcounter::visit_functioncall (functioncall *e)
 	t.declare (*parent);
       e->args[i]->visit (this);
     }
+
+  tmpvar t = parent->gensym (e->type);
+  if (!parent->session->unoptimized && e->type == pe_string && e->var_assigned_to_retval.empty())
+    t.declare(*parent);
 }
 
 
@@ -4920,9 +5656,13 @@ c_unparser::visit_functioncall (functioncall* e)
 	throw SEMANTIC_ERROR (_("function argument type mismatch"),
 			      e->args[i]->tok, r->formal_args[i]->tok);
 
+      symbol *sym_out;
       if (e->args[i]->tok->type == tok_number
 	  || e->args[i]->tok->type == tok_string)
 	t.override(c_expression(e->args[i]));
+      else if (r->formal_args[i]->char_ptr_arg && e->args[i]->is_symbol(sym_out)
+               && is_local(sym_out->referent, sym_out->tok))
+        t.override(getvar(sym_out->referent, e->args[i]->tok).value());
       else
         {
 	  // o->newline() << "c->last_stmt = "
@@ -4940,27 +5680,59 @@ c_unparser::visit_functioncall (functioncall* e)
 	throw SEMANTIC_ERROR (_("function argument type mismatch"),
 			      e->args[i]->tok, r->formal_args[i]->tok);
 
-      c_assign ("c->locals[c->nesting+1]." +
-		c_funcname (r->name) + "." +
-                c_localname (r->formal_args[i]->name),
-                tmp[i].value(),
-                e->args[i]->type,
-                "function actual argument copy",
-                e->args[i]->tok);
+      if (r->formal_args[i]->char_ptr_arg)
+        o->newline() << "c->locals[c->nesting+1]." + c_funcname (r->name) + "."
+                        + c_localname (r->formal_args[i]->name) << " = "
+                     << tmp[i].value() << ";";
+      else
+        c_assign ("c->locals[c->nesting+1]." +
+                  c_funcname (r->name) + "." +
+                  c_localname (r->formal_args[i]->name),
+                  tmp[i].value(),
+                  e->args[i]->type,
+                  "function actual argument copy",
+                  e->args[i]->tok);
     }
+
+  tmpvar tmp_ret = gensym (e->type);
+  // store the return value after the function arguments have been worked out
+  // to avoid problems that may occure with nesting.
+  if (!e->var_assigned_to_retval.empty())
+    o->newline() << "c->locals[c->nesting+1]." << c_funcname(r->name)
+                 << ".__retvalue = &" << e->var_assigned_to_retval << "[0];";
+  // store the return value into a tmpvar in case the return is never used/assigned
+  else if (!session->unoptimized && e->type == pe_string)
+    o->newline() << "c->locals[c->nesting+1]." << c_funcname(r->name)
+                 << ".__retvalue = &" << tmp_ret.value() << "[0];";
 
   // call function
   o->newline() << c_funcname (r->name) << " (c);";
   o->newline() << "if (unlikely(c->last_error)) goto out;";
 
-  // return result from retvalue slot
+  if (!already_checked_action_count && !session->suppress_time_limits
+      && !session->unoptimized)
+    {
+      max_action_info mai (*session);
+      e->referent->body->visit(&mai);
+      // if an unoptimized function/probe called an optimized function, then
+      // increase the counter, since the subtraction isn't done within an
+      // optimized function
+      if(mai.statement_count_finite())
+        record_actions (mai.statement_count, e->tok, true);
+    }
+
+  // return result from retvalue slot NB: this must be last, for the
+  // enclosing statement-expression ({ ... }) to carry this value.
   if (r->type == pe_unknown)
     // If we passed typechecking, then nothing will use this return value
     o->newline() << "(void) 0;";
-  else
+  else if (session->unoptimized || r->type != pe_string)
     o->newline() << "c->locals[c->nesting+1]"
                  << "." << c_funcname (r->name)
                  << ".__retvalue;";
+  else if (e->var_assigned_to_retval.empty())
+    o->newline() << tmp_ret.value() << ";";
+
 }
 
 
@@ -5446,6 +6218,8 @@ struct unwindsym_dump_context
   size_t eh_frame_hdr_len;
   Dwarf_Addr eh_addr;
   Dwarf_Addr eh_frame_hdr_addr;
+  void *debug_line;
+  size_t debug_line_len;
 
   set<string> undone_unwindsym_modules;
 };
@@ -5779,6 +6553,186 @@ dump_section_list (Dwfl_Module *m,
   return DWARF_CB_ABORT;
 }
 
+static void find_debug_frame_offset (Dwfl_Module *m,
+                                     unwindsym_dump_context *c)
+{
+  Dwarf_Addr start, bias = 0;
+  GElf_Ehdr *ehdr, ehdr_mem;
+  GElf_Shdr *shdr, shdr_mem;
+  Elf_Scn *scn = NULL;
+  Elf_Data *data = NULL;
+  Elf *elf;
+
+  dwfl_module_info (m, NULL, &start, NULL, NULL, NULL, NULL, NULL);
+
+  // fetch .debug_frame info preferably from dwarf debuginfo file.
+  elf = (dwarf_getelf (dwfl_module_getdwarf (m, &bias))
+	 ?: dwfl_module_getelf (m, &bias));
+  ehdr = gelf_getehdr(elf, &ehdr_mem);
+
+  while ((scn = elf_nextscn(elf, scn)))
+    {
+      shdr = gelf_getshdr(scn, &shdr_mem);
+      if (strcmp(elf_strptr(elf, ehdr->e_shstrndx, shdr->sh_name),
+		 ".debug_frame") == 0)
+	{
+	  data = elf_rawdata(scn, NULL);
+	  break;
+	}
+    }
+
+  if (!data) // need this check since dwarf_next_cfi() doesn't do it
+    return;
+
+  // In the .debug_frame the FDE encoding is always DW_EH_PE_absptr.
+  // So there is no need to read the CIEs.  And the size is either 4
+  // or 8, depending on the elf class from e_ident.
+  int size = (ehdr->e_ident[EI_CLASS] == ELFCLASS32) ? 4 : 8;
+  int res = 0;
+  Dwarf_Off off = 0;
+  Dwarf_CFI_Entry entry;
+
+  while (res != 1)
+    {
+      Dwarf_Off next_off;
+      res = dwarf_next_cfi (ehdr->e_ident, data, false, off, &next_off, &entry);
+      if (res == 0)
+	{
+	  if (entry.CIE_id != DW_CIE_ID_64) // ignore CIEs
+	    {
+	      Dwarf_Addr addr;
+	      if (size == 4)
+		addr = (*((uint32_t *) entry.fde.start));
+	      else
+		addr = (*((uint64_t *) entry.fde.start));
+              Dwarf_Addr first_addr = addr;
+              int res = dwfl_module_relocate_address (m, &first_addr);
+              DWFL_ASSERT ("find_debug_frame_offset, dwfl_module_relocate_address",
+                           res >= 0);
+              c->debug_frame_off = addr - first_addr;
+	    }
+	}
+      else if (res < 1)
+        return;
+      off = next_off;
+    }
+}
+
+static int
+dump_line_tables_check (void *data, size_t data_len)
+{
+  uint64_t unit_length = 0,  header_length = 0;
+  uint16_t version = 0;
+  uint8_t *ptr = (uint8_t *)data, *endunitptr, opcode_base = 0;
+  unsigned length = 4;
+
+  while (ptr < ((uint8_t *)data + data_len))
+   {
+      if (ptr + 4 > (uint8_t *)data + data_len)
+        return DWARF_CB_ABORT;
+
+      unit_length = *((uint32_t *) ptr);
+      ptr += 4;
+      if (unit_length == 0xffffffff)
+        {
+          if (ptr + 8 > (uint8_t *)data + data_len)
+            return DWARF_CB_ABORT;
+          length = 8;
+          unit_length = *((uint64_t *) ptr);
+          ptr += 8;
+        }
+
+      if ((ptr + unit_length > (uint8_t *)data + data_len) || unit_length <= 2)
+        return DWARF_CB_ABORT;
+
+      endunitptr = ptr + unit_length;
+
+      version  = *((uint16_t *)ptr);
+      ptr += 2;
+
+      if (unit_length <= (2 + length))
+        return DWARF_CB_ABORT;
+
+      if (length == 4)
+        {
+          header_length = *((uint32_t *) ptr);
+          ptr += 4;
+        }
+      else
+        {
+          header_length = *((uint64_t *) ptr);
+          ptr += 8;
+        }
+
+      // safety check for the next few jumps
+      if (header_length <= ((version >= 4 ? 5 : 4) + 2)
+          || (unit_length - (2 + length) < header_length))
+        return DWARF_CB_ABORT;
+
+      // skip past min instr length, max ops per instr, and line base
+      if (version >= 4)
+        ptr += 3;
+      else
+        ptr += 2;
+
+      // check that the line range is not 0
+      if (*ptr == 0)
+        return DWARF_CB_ABORT;
+      ptr++;
+
+      // check that the header accomodates the std opcode lens section
+      opcode_base = *((uint8_t *) ptr);
+      if (header_length <= (uint64_t) (opcode_base + (version >= 4 ? 7 : 6)))
+        return DWARF_CB_ABORT;
+
+      // the initial checks stop here, before the directory table
+      ptr = endunitptr;
+    }
+  return DWARF_CB_OK;
+}
+
+static void
+dump_line_tables (Dwfl_Module *m, unwindsym_dump_context *c,
+                  const char *modname, Dwarf_Addr base)
+{
+  Elf* elf;
+  Elf_Scn* scn = NULL;
+  Elf_Data* data;
+  GElf_Ehdr *ehdr, ehdr_mem;
+  GElf_Shdr* shdr, shdr_mem;
+  Dwarf_Addr bias, start;
+
+  dwfl_module_info (m, NULL, &start, NULL, NULL, NULL, NULL, NULL);
+
+  elf = dwfl_module_getelf (m, &bias);
+  if (elf == NULL)
+    return;
+
+  // we do not have the index for debug_line, so we can't use elf_getscn()
+  // instead, we need to seach through the sections for the correct one as in
+  // get_unwind_data()
+  ehdr = gelf_getehdr(elf, &ehdr_mem);
+  while ((scn = elf_nextscn(elf, scn)))
+    {
+      shdr = gelf_getshdr(scn, &shdr_mem);
+      if (strcmp(elf_strptr(elf, ehdr->e_shstrndx, shdr->sh_name),
+                 ".debug_line") == 0)
+        {
+          data = elf_rawdata(scn, NULL);
+          if (dump_line_tables_check(data->d_buf, data->d_size) == DWARF_CB_ABORT)
+            return;
+          c->debug_line = data->d_buf;
+          c->debug_line_len = data->d_size;
+          break;
+        }
+    }
+
+  // still need to get some kind of information about the sec_load_offset for
+  // kernel addresses if there is no unwind data
+  if (c->debug_line_len > 0 && !c->session.need_unwind)
+    find_debug_frame_offset (m, c);
+}
+
 /* Some architectures create special local symbols that are not
    interesting. */
 static int
@@ -6058,7 +7012,11 @@ dump_unwindsym_cxt_table(systemtap_session& session, ostream& output,
       return;
     }
 
-  output << "#if defined(STP_USE_DWARF_UNWINDER) && defined(STP_NEED_UNWIND_DATA)\n";
+  // if it is the debug_line data, do not need the unwind flags to be defined
+  if(table == "debug_line")
+    output << "#if defined(STP_NEED_LINE_DATA)\n";
+  else
+    output << "#if defined(STP_USE_DWARF_UNWINDER) && defined(STP_NEED_UNWIND_DATA)\n";
   output << "static uint8_t _stp_module_" << modindex << "_" << table;
   if (!secname.empty())
     output << "_" << secindex;
@@ -6072,7 +7030,10 @@ dump_unwindsym_cxt_table(systemtap_session& session, ostream& output,
 	output << "\n" << "   ";
     }
   output << "};\n";
-  output << "#endif /* STP_USE_DWARF_UNWINDER && STP_NEED_UNWIND_DATA */\n";
+  if (table == "debug_line")
+    output << "#endif /* STP_NEED_LINE_DATA */\n";
+  else
+    output << "#endif /* STP_USE_DWARF_UNWINDER && STP_NEED_UNWIND_DATA */\n";
 }
 
 static int
@@ -6093,6 +7054,8 @@ dump_unwindsym_cxt (Dwfl_Module *m,
   size_t eh_frame_hdr_len = c->eh_frame_hdr_len;
   Dwarf_Addr eh_addr = c->eh_addr;
   Dwarf_Addr eh_frame_hdr_addr = c->eh_frame_hdr_addr;
+  void *debug_line = c->debug_line;
+  size_t debug_line_len = c->debug_line_len;
 
   dump_unwindsym_cxt_table(c->session, c->output, modname, stpmod_idx, "", 0,
 			   "debug_frame", debug_frame, debug_len);
@@ -6103,6 +7066,9 @@ dump_unwindsym_cxt (Dwfl_Module *m,
   dump_unwindsym_cxt_table(c->session, c->output, modname, stpmod_idx, "", 0,
 			   "eh_frame_hdr", eh_frame_hdr, eh_frame_hdr_len);
 
+  dump_unwindsym_cxt_table(c->session, c->output, modname, stpmod_idx, "", 0,
+			   "debug_line", debug_line, debug_line_len);
+
   if (c->session.need_unwind && debug_frame == NULL && eh_frame == NULL)
     {
       // There would be only a small benefit to warning.  A user
@@ -6112,6 +7078,13 @@ dump_unwindsym_cxt (Dwfl_Module *m,
       if (c->session.verbose > 2)
 	c->session.print_warning ("No unwind data for " + modname
 				  + ", " + dwfl_errmsg (-1));
+    }
+
+  if (c->session.need_lines && debug_line == NULL)
+    {
+      if (c->session.verbose > 2)
+        c->session.print_warning ("No debug line data for " + modname + ", " +
+                                  dwfl_errmsg (-1));
     }
 
   for (unsigned secidx = 0; secidx < c->seclist.size(); secidx++)
@@ -6197,7 +7170,18 @@ dump_unwindsym_cxt (Dwfl_Module *m,
 	{
 	  c->output << ".debug_hdr = NULL,\n";
 	  c->output << ".debug_hdr_len = 0,\n";
+          if (c->session.need_lines && secname == ".text")
+            {
+              c->output << "#if defined(STP_NEED_LINE_DATA)\n";
+              Dwarf_Addr dwbias = 0;
+              dwfl_module_getdwarf (m, &dwbias);
+              c->output << ".sec_load_offset = 0x"
+                        << hex << debug_frame_off - dwbias << dec << "\n";
+              c->output << "#else\n";
+            }
 	  c->output << ".sec_load_offset = 0\n";
+          if (c->session.need_lines && secname == ".text")
+            c->output << "#endif /* STP_NEED_LINE_DATA */\n";
 	}
 
 	c->output << "},\n";
@@ -6214,10 +7198,19 @@ dump_unwindsym_cxt (Dwfl_Module *m,
   // For kernel modules just the name itself.
   string mainpath = resolve_path(mainfile);
   string mainname;
-  if (modname[0] == '/') // userspace
+  if (is_user_module(modname)) // userspace
     mainname = lex_cast_qstring (path_remove_sysroot(c->session,mainpath));
   else
-    mainname = lex_cast_qstring (modname);
+    { // kernel module
+
+      // If the module name is the full path to the ko, then we have to retrieve
+      // the actual name by which the module will be known inside the kernel.
+      // Otherwise, section relocations would be mismatched.
+      if (is_fully_resolved(modname, c->session.sysroot, c->session.sysenv))
+        mainname = lex_cast_qstring (modname_from_path(modname));
+      else
+        mainname = lex_cast_qstring (modname);
+    }
 
   c->output << "static struct _stp_module _stp_module_" << stpmod_idx << " = {\n";
   c->output << ".name = " << mainname.c_str() << ",\n";
@@ -6267,6 +7260,22 @@ dump_unwindsym_cxt (Dwfl_Module *m,
   c->output << ".unwind_hdr_len = 0,\n";
   if (eh_frame != NULL)
     c->output << "#endif /* STP_USE_DWARF_UNWINDER && STP_NEED_UNWIND_DATA*/\n";
+
+  if (debug_line != NULL)
+    {
+      c->output << "#if defined(STP_NEED_LINE_DATA)\n";
+      c->output << ".debug_line = "
+		<< "_stp_module_" << stpmod_idx << "_debug_line, \n";
+      c->output << ".debug_line_len = " << debug_line_len << ", \n";
+      c->output << "#else\n";
+    }
+
+  c->output << ".debug_line = NULL,\n";
+  c->output << ".debug_line_len = 0,\n";
+
+  if (debug_line != NULL)
+    c->output << "#endif /* STP_NEED_LINE_DATA */\n";
+
   c->output << ".sections = _stp_module_" << stpmod_idx << "_sections" << ",\n";
   c->output << ".num_sections = sizeof(_stp_module_" << stpmod_idx << "_sections)/"
             << "sizeof(struct _stp_section),\n";
@@ -6383,6 +7392,13 @@ dump_unwindsyms (Dwfl_Module *m,
   if (res == DWARF_CB_OK && c->session.need_unwind)
     res = dump_unwind_tables (m, c, name, base);
 
+  c->debug_line = NULL;
+  c->debug_line_len = 0;
+  if (res == DWARF_CB_OK && c->session.need_lines)
+    // we dont set res = dump_line_tables() because unwindsym stuff should still
+    // get dumped to the output even if gathering debug_line data fails
+    (void) dump_line_tables (m, c, name, base);
+
   /* And finally dump everything collected in the output. */
   if (res == DWARF_CB_OK)
     res = dump_unwindsym_cxt (m, c, name, base);
@@ -6431,14 +7447,13 @@ add_unwindsym_ldd (systemtap_session &s)
       assert (modname.length() != 0);
       if (! is_user_module (modname)) continue;
 
-      struct dwflpp *mod_dwflpp = new dwflpp(s, modname, false);
-      mod_dwflpp->iterate_over_modules(&query_module, mod_dwflpp);
-      if (mod_dwflpp->module) // existing binary
+      dwflpp mod_dwflpp (s, modname, false);
+      mod_dwflpp.iterate_over_modules(&query_module, &mod_dwflpp);
+      if (mod_dwflpp.module) // existing binary
         {
-          assert (mod_dwflpp->module_name != "");
-          mod_dwflpp->iterate_over_libraries (&add_unwindsym_iol_callback, &added);
+          assert (mod_dwflpp.module_name != "");
+          mod_dwflpp.iterate_over_libraries (&add_unwindsym_iol_callback, &added);
         }
-      delete mod_dwflpp;
     }
 
   s.unwindsym_modules.insert (added.begin(), added.end());
@@ -6448,11 +7463,18 @@ static int find_vdso(const char *path, const struct stat *, int type)
 {
   if (type == FTW_F)
     {
+      /* Assume that if the path's basename starts with 'vdso' and
+       * ends with '.so', it is the vdso.
+       *
+       * Note that this logic should match up with the logic in the
+       * _stp_vma_match_vdso() function in runtime/vma.c. */
       const char *name = strrchr(path, '/');
       if (name)
 	{
+	  const char *ext;
+
 	  name++;
-	  const char *ext = strrchr(name, '.');
+	  ext = strrchr(name, '.');
 	  if (ext
 	      && strncmp("vdso", name, 4) == 0
 	      && strcmp(".so", ext) == 0)
@@ -6532,6 +7554,8 @@ emit_symbol_data (systemtap_session& s)
 				 0, /* eh_frame_hdr_len */
 				 0, /* eh_addr */
 				 0, /* eh_frame_hdr_addr */
+				 NULL, /* debug_line */
+				 0, /* debug_line_len */
 				 s.unwindsym_modules };
 
   // Micro optimization, mainly to speed up tiny regression tests
@@ -6621,6 +7645,8 @@ self_unwind_declarations(unwindsym_dump_context *ctx)
   ctx->output << ".unwind_hdr_len = 0,\n";
   ctx->output << ".debug_frame = NULL,\n";
   ctx->output << ".debug_frame_len = 0,\n";
+  ctx->output << ".debug_line = NULL,\n";
+  ctx->output << ".debug_line_len = 0,\n";
   ctx->output << "};\n";
 }
 
@@ -6665,9 +7691,6 @@ emit_symbol_data_done (unwindsym_dump_context *ctx, systemtap_session& s)
       s.print_warning (_("missing unwind/symbol data for module '")
 		       + (*it) + "'");
 }
-
-
-
 
 struct recursion_info: public traversing_visitor
 {
@@ -6834,8 +7857,32 @@ translate_pass (systemtap_session& s)
       if (s.need_unwind)
 	s.op->newline() << "#define STP_NEED_UNWIND_DATA 1";
 
+      if (s.need_lines)
+        s.op->newline() << "#define STP_NEED_LINE_DATA 1";
+
       // Emit the total number of probes (not regarding merged probe handlers)
       s.op->newline() << "#define STP_PROBE_COUNT " << s.probes.size();
+
+      // Emit systemtap_module_refresh() prototype so we can reference it
+      s.op->newline() << "static void systemtap_module_refresh (const char* modname);";
+
+      if (!s.runtime_usermode_p())
+        {
+          // When on-the-fly [dis]arming is used, module_refresh can be called from
+          // both the module notifier, as well as when probes need to be
+          // armed/disarmed. We need to protect it to ensure it's only run one at a
+          // time.
+          s.op->newline() << "#include <linux/mutex.h>";
+          s.op->newline() << "static DEFINE_MUTEX(module_refresh_mutex);";
+
+          // For some probes, on-the-fly support is provided through a
+          // background timer (module_refresh_timer). We need to disable that
+          // part if hrtimers are not supported.
+          s.op->newline() << "#include <linux/version.h>";
+          s.op->newline() << "#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,17)";
+          s.op->newline() << "#define STP_ON_THE_FLY_TIMER_ENABLE";
+          s.op->newline() << "#endif";
+        }
 
       s.op->newline() << "#include \"runtime.h\"";
 
@@ -6894,6 +7941,7 @@ translate_pass (systemtap_session& s)
 	s.op->newline() << "struct stp_globals {};";
 
       // Common (static atomic) state of the stap session.
+      s.op->newline();
       s.op->newline() << "#include \"common_session_state.h\"";
 
       s.op->newline() << "#include \"probe_lock.h\" ";
@@ -6931,24 +7979,6 @@ translate_pass (systemtap_session& s)
 	  s.op->newline();
 	  s.up->emit_function (it->second);
 	}
-      s.op->assert_0_indent();
-
-      // Run a varuse_collecting_visitor over probes that need global
-      // variable locks.  We'll use this information later in
-      // emit_locks()/emit_unlocks().
-      for (unsigned i=0; i<s.probes.size(); i++)
-	{
-        assert_no_interrupts();
-        if (s.probes[i]->needs_global_locks())
-	    s.probes[i]->body->visit (&cup.vcv_needs_global_locks);
-	}
-      s.op->assert_0_indent();
-
-      for (unsigned i=0; i<s.probes.size(); i++)
-        {
-          assert_no_interrupts();
-          s.up->emit_probe (s.probes[i]);
-        }
       s.op->assert_0_indent();
 
       // Let's find some stats for the embedded pp strings.  Maybe they
@@ -6989,9 +8019,11 @@ translate_pass (systemtap_session& s)
             clog << "*" << endl;                                                \
         }
 
+      s.op->newline();
       s.op->newline() << "struct stap_probe {";
-      s.op->newline(1) << "size_t index;";
+      s.op->newline(1) << "const size_t index;";
       s.op->newline() << "void (* const ph) (struct context*);";
+      s.op->newline() << "unsigned cond_enabled:1;"; // just one bit required
       s.op->newline() << "#if defined(STP_TIMING) || defined(STP_ALIBI)";
       CALCIT(location);
       CALCIT(derivation);
@@ -7008,16 +8040,38 @@ translate_pass (systemtap_session& s)
       s.op->newline() << "#define STAP_PROBE_INIT_NAME(PN)";
       s.op->newline() << "#endif";
       s.op->newline() << "#define STAP_PROBE_INIT(I, PH, PP, PN, L, D) "
-                      << "{ .index=(I), .ph=(PH), .pp=(PP), "
+                      << "{ .index=(I), .ph=(PH), .cond_enabled=1, .pp=(PP), "
                       << "STAP_PROBE_INIT_NAME(PN) "
                       << "STAP_PROBE_INIT_TIMING(L, D) "
                       << "}";
-      s.op->newline(-1) << "} static const stap_probes[] = {";
+      s.op->newline(-1) << "} static stap_probes[];";
+      s.op->assert_0_indent();
+#undef CALCIT
+
+      // Run a varuse_collecting_visitor over probes that need global
+      // variable locks.  We'll use this information later in
+      // emit_locks()/emit_unlocks().
+      for (unsigned i=0; i<s.probes.size(); i++)
+	{
+        assert_no_interrupts();
+        s.probes[i]->session_index = i;
+        if (s.probes[i]->needs_global_locks())
+	    s.probes[i]->body->visit (&cup.vcv_needs_global_locks);
+	}
+      s.op->assert_0_indent();
+
+      for (unsigned i=0; i<s.probes.size(); i++)
+        {
+          assert_no_interrupts();
+          s.up->emit_probe (s.probes[i]);
+        }
+      s.op->assert_0_indent();
+
+      s.op->newline() << "static struct stap_probe stap_probes[] = {";
       s.op->indent(1);
       for (unsigned i=0; i<s.probes.size(); ++i)
         {
           derived_probe* p = s.probes[i];
-          p->session_index = i;
           s.op->newline() << "STAP_PROBE_INIT(" << i << ", &" << p->name << ", "
                           << lex_cast_qstring (*p->sole_location()) << ", "
                           << lex_cast_qstring (*p->script_location()) << ", "
@@ -7025,8 +8079,6 @@ translate_pass (systemtap_session& s)
                           << lex_cast_qstring (p->derived_locations()) << "),";
         }
       s.op->newline(-1) << "};";
-      s.op->assert_0_indent();
-#undef CALCIT
 
       if (s.runtime_usermode_p())
         {
@@ -7038,6 +8090,7 @@ translate_pass (systemtap_session& s)
           s.op->assert_0_indent();
         }
 
+      s.op->assert_0_indent();
       s.op->newline();
       s.up->emit_module_init ();
       s.op->assert_0_indent();

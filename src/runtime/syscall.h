@@ -93,6 +93,14 @@
 #define MREMAP_SYSCALL_NO(tsk)		163
 #endif
 
+#if defined(__aarch64__)
+#define MMAP_SYSCALL_NO(tsk)		222
+#define MMAP2_SYSCALL_NO(tsk)		222
+#define MPROTECT_SYSCALL_NO(tsk)	226
+#define MUNMAP_SYSCALL_NO(tsk)		215
+#define MREMAP_SYSCALL_NO(tsk)		216
+#endif
+
 #if !defined(MMAP_SYSCALL_NO) || !defined(MMAP2_SYSCALL_NO)		\
 	|| !defined(MPROTECT_SYSCALL_NO) || !defined(MUNMAP_SYSCALL_NO)	\
 	|| !defined(MREMAP_SYSCALL_NO)

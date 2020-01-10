@@ -59,11 +59,12 @@ enum {
   LONG_OPT_BENCHMARK_SDT_LOOPS,
   LONG_OPT_BENCHMARK_SDT_THREADS,
   LONG_OPT_COLOR_ERRS,
+  LONG_OPT_SAVE_UPROBES,
 };
 
 // NB: when adding new options, consider very carefully whether they
 // should be restricted from stap clients (after --client-options)!
-#define STAP_SHORT_OPTIONS "hVvtp:I:e:o:R:r:a:m:kgPc:x:D:bs:uqwl:d:L:FS:B:J:jWG:"
+#define STAP_SHORT_OPTIONS "hVvtp:I:e:E:o:R:r:a:m:kgPc:x:D:bs:uqwl:d:L:FS:B:J:jWG:"
 
 #define OWE5 "tter"
 #define OWE1 "uild-"

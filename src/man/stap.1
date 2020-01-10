@@ -92,7 +92,7 @@ stap \- systemtap script translator/driver
 The
 .IR stap
 program is the front-end to the Systemtap tool.  It accepts probing
-instructions (written in a simple scripting language), translates
+instructions written in a simple domain-specific language, translates
 those instructions into C code, compiles this C code, and loads the
 resulting module into a running Linux kernel or a DynInst user-space
 mutator, to perform the requested system trace/probe functions.  You
@@ -103,10 +103,12 @@ the script voluntarily invokes the
 .I exit()
 function, or by sufficient number of soft errors.
 .PP
-The language, which is described in a later section, is strictly typed,
-declaration free, procedural, and inspired by
-.IR awk .
-It allows source code points or events in the kernel to be associated
+The language, which is described the
+.IR "SCRIPT LANGUAGE" 
+section below, is strictly typed, expressive, declaration free, procedural,
+prototyping-friendly, and inspired by
+.IR awk " and " C .
+It allows source code points or events in the system to be associated
 with handlers, which are subroutines that are executed synchronously.  It is
 somewhat similar conceptually to "breakpoint command lists" in the
 .IR gdb
@@ -154,10 +156,11 @@ embedded C.
 .TP
 .B \-P
 Prologue-searching mode.  Activate heuristics to work around incorrect
-debugging information for $context variables.
+debugging information for function parameter $context variables.
 .TP
 .B \-u
-Unoptimized mode.  Disable unused code elision during elaboration.
+Unoptimized mode.  Disable unused code elision and many other optimizations
+during elaboration / translation.
 .TP
 .B \-w
 Suppressed warnings mode.  Disables all warning messages.
@@ -166,7 +169,9 @@ Suppressed warnings mode.  Disables all warning messages.
 Treat all warnings as errors.
 .TP
 .BI \-b
-Use bulk mode (percpu files) for kernel-to-user data transfer.
+Use bulk mode (percpu files) for kernel-to-user data transfer.  Use the
+.IR stap\-merge
+program to multplex them back together later.
 .TP
 .B \-t
 Collect timing information on the number of times probe executes
@@ -252,10 +257,15 @@ effect of setting target() to the pid of the command ran.
 .TP
 .BI \-x " PID"
 Sets target() to PID. This allows scripts to be written that filter on
-a specific process.
+a specific process. Scripts run independent of the PID's lifespan.
 .TP
 .BI \-e " SCRIPT"
 Run the given SCRIPT specified on the command line.
+.TP
+.BI \-E " SCRIPT"
+Run the given SCRIPT specified. This SCRIPT is run in addition to the main
+script specified, through -e, or as a script file. This option can be repeated
+to run multiple scripts, and can be used in listing mode (\-l/\-L).
 .TP
 .BI \-l " PROBE"
 Instead of running a probe script, just list all available probe
@@ -308,7 +318,7 @@ details.
 
 .TP
 .BI \-\-check\-version
-This option is used to check if the active script has any constructors
+This option is used to check if the active script has any constructs
 that may be systemtap version specific.  See the DEPRECATION section
 for more details.
 
@@ -681,6 +691,12 @@ below for more information.
 .BI \-\-dyninst
 Shorthand for \fI\-\-runtime=dyninst\fR.
 
+.TP
+.BI \-\-save-uprobes
+On machines that require SystemTap to build its own uprobes module (kernels
+prior to version 3.5), this option instructs SystemTap to also save a copy of
+the module in the current directory (creating a new "uprobes" directory first).
+
 .SH ARGUMENTS
 
 Any additional arguments on the command line are passed to the script
@@ -689,7 +705,7 @@ parser for substitution.  See below.
 .SH SCRIPT LANGUAGE
 
 The systemtap script language resembles
-.IR awk .
+.IR awk " and " C .
 There are two main outermost constructs: probes and functions.  Within
 these, statements and expressions use C-like operator syntax and
 precedence.
@@ -891,12 +907,11 @@ and user scripts.
 
 .SS VARIABLES
 Identifiers for variables and functions are an alphanumeric sequence,
-and may include "_" and "$" characters.  They may not start with a
+and may include \fB_\fR and \fB$\fR characters.  They may not start with a
 plain digit, as in C.  Each variable is by default local to the probe
 or function statement block within which it is mentioned, and therefore
 its scope and lifetime is limited to a particular probe or function
 invocation.
-.\" XXX add statistics type here once it's supported
 .PP
 Scalar variables are implicitly typed as either string or integer.
 Associative arrays also have a string or integer value, and a
@@ -957,6 +972,18 @@ typed arrays.
 .BR global " wrapped_array1%[10]", " wrapped_array2%"
 .ESAMPLE
 
+.PP
+Many types of probe points provide context variables, which are
+run-time values, safely extracted from the kernel or userspace program
+being probed.  These are prefixed with the \fB$\fR character.  The
+CONTEXT VARIABLES section in
+.IR stapprobes (3stap)
+lists what is available for each type of probe point.  These context
+variables become normal string or numeric scalars once they are stored
+in normal script variables.  See the TYPECASTING section below on how
+to to turn them back into typed pointers for further processing as
+context variables.
+
 .SS STATEMENTS
 Statements enable procedural control flow.  They may occur within
 functions and probe handlers.  The total number of statements executed
@@ -1011,10 +1038,20 @@ evaluated once at the beginning of the loop.
 Same as above, used when the array is indexed with a tuple of keys.
 A sorting suffix may be used on at most one VAR or ARRAY identifier.
 .TP
+.BR foreach " ([VAR1, VAR2, ...] " in " ARRAY [INDEX1, INDEX2, ...] [ "limit " EXP ]) STMT"
+Same as above, where iterations are limited to elements in the array where
+the keys match the index values specified. The symbol * can be used to specify
+an index and will be treated as a wildcard.
+.TP
 .BR foreach " (VALUE = VAR " in " ARRAY [ "limit " EXP ]) STMT"
 This variant of foreach saves current value into VALUE on each
 iteration, so it is the same as ARRAY[VAR].  This also works with a
 tuple of keys.  Sorting suffixes on VALUE have the same effect as on ARRAY.
+.TP
+.BR foreach " (VALUE = VAR " in " ARRAY [INDEX1, INDEX2, ...] [ "limit " EXP ]) STMT"
+Same as above, where iterations are limited to elements in the array where the
+keys match the index values specified. The symbol * can be used to specify
+an index and will be treated as a wildcard.
 .TP
 .BR break ", " continue
 Exit or iterate the innermost nesting loop
@@ -1039,7 +1076,11 @@ outer try/catch blocks, if any.
 Same as above, plus assign the error message to the string scalar variable VAR.
 .TP
 .BR delete " ARRAY[INDEX1, INDEX2, ...]"
-Remove from ARRAY the element specified by the index tuple.  The value will no
+Remove from ARRAY the element specified by the index tuple.
+If the index tuple contains a * in place of an index, the * is treated as a
+wildcard and all elements with keys that match the index tuple will be removed
+from ARRAY.
+The value will no
 longer be available, and subsequent iterations will not report the element.
 It is not an error to delete an element that does not exist.
 .TP
@@ -1088,6 +1129,8 @@ array membership check
 .RB exp " in " array
 .br
 .BR "[" exp1 ", " exp2 ", " ... "] in " array
+.br
+.BR "[" "*" ", " "*" ", ... "] in " array
 
 .SS REGULAR EXPRESSION MATCHING
 The scripting language supports regular expression matching.
@@ -1112,6 +1155,7 @@ handler") that is to be executed when any of those events occur.  The
 general syntax is as follows:
 .SAMPLE
 .BR probe " PROBEPOINT [" , " PROBEPOINT] " { " [STMT ...] " }
+.BR probe " PROBEPOINT [" , " PROBEPOINT] " "if (" CONDITION ") { " "[STMT ...]" " }"
 .ESAMPLE
 .PP
 Events are specified in a special syntax called "probe points".  There
@@ -1141,6 +1185,17 @@ See the
 .IR stapprobes (3stap)
 man pages to see the kinds of context variables available at each kind
 of probe point.
+.PP
+Probes may be decorated with an 
+.IR "arming condition" ,
+consisting of a simple boolean expression on read-only global script
+variables.  While disarmed (condition evaluates to false), some probe
+types reduce or eliminate their run-time overheads.  When an arming
+condition evaluates to true, probes will be
+.I soon
+re-armed, and their probe handlers will start getting called as the
+events fire.  (Some events may be lost during the arming interval.  If
+this is unacceptable, do not use arming conditions for those probes.)
 .PP
 New probe points may be defined using "aliases".  Probe point aliases
 look similar to probe definitions, but instead of activating a probe
@@ -1385,11 +1440,12 @@ probe end {
 .ESAMPLE
 
 .SS TYPECASTING
-Once a pointer has been saved into a script integer variable, the
-translator loses the type information necessary to access members from
-that pointer.  Using the
+Once a pointer (see the CONTEXT VARIABLES section of 
+.IR stapprobes (3stap))
+has been saved into a script integer variable, the translator loses the type
+information necessary to access members from that pointer.  Using the
 .I @cast()
-operator tells the translator how to read a pointer.
+operator tells the translator how to interpret the number as a typed pointer.
 .SAMPLE
 @cast(p, "type_name"[, "module"])\->member
 .ESAMPLE
@@ -1431,8 +1487,7 @@ Multiple headers may be specified in sequence to resolve a codependency.
 Values acquired by 
 .BR @cast
 may be pretty-printed by the 
-.BR
-$ " and " $$
+.BR $ " and " $$
 suffix operators, the same way as described in the CONTEXT VARIABLES
 section of the
 .IR stapprobes (3stap) 
@@ -1560,6 +1615,10 @@ and
 .I THIS->__retvalue
 respectively inside the function. This is useful for quickly migrating code written for SystemTap version 1.7 and earlier.
 .TP
+.I /* unmodified-fnargs */
+in an embedded-C function, means that the function arguments are not modified
+inside the function body.
+.TP
 .I /* string */
 in embedded-C expressions only, means that the expression has
 .I const char *
@@ -1678,7 +1737,11 @@ processes, then use rmmod to unload the systemtap module.
 .SH EXAMPLES
 See the
 .IR stapex (3stap)
-manual page for a collection of samples.
+manual page for a brief collection of samples, or a large set of
+installed samples under the systemtap documentation/testsuite
+directories.  See
+.IR stappaths (7stap)
+for the likely location of these on the system.
 
 .SH CACHING
 The systemtap translator caches the pass 3 output (the generated C
@@ -1703,11 +1766,48 @@ representing the interval in seconds. In the absence of this file, a default
 will be created with the interval set to 300 s.
 
 .SH SAFETY AND SECURITY
-Systemtap is an administrative tool.  It exposes kernel internal data
-structures and potentially private user information.
 
-To actually run the kernel objects it builds, a user must be one of
-the following:
+.PP
+Systemtap is may be used as a poweful administrative tool.  It can
+expose kernel internal data structures and potentially private user
+information.  (In
+.BR dyninst
+runtime mode, this is not the case, see the
+.I ALTERNATE RUNTIMES
+section below.)
+
+The translator asserts many safety constraints during compilation and
+more during run-time.  It aims to ensure that no handler routine can
+run for very long, allocate boundless memory, perform unsafe
+operations, or in unintentionally interfere with the system.  Uses of
+script global variables are automatically read/write locked as
+appropriate, to protect against manipulation by concurrent probe
+handlers.  (Deadlocks are detected with timeouts.  Use the
+.BR \-t
+flag to receive reports of excessive lock contention.)  Experimenting
+with scripts is therefore generally
+.BR safe .
+The guru-mode
+.B \-g
+option allows administrators to bypass most safety measures, which
+permits invasive or state-changing operations, embedded-C code, and
+increases the risk of upset.  By default, overload prevention is
+turned on for all modules.  If you would like to disable overload
+processing, use the
+.BR \-\-suppress\-time\-limits
+option.
+
+Errors that are caught at run time normally result in a clean script
+shutdown and a pass-5 error message.
+The
+.BR \-\-suppress\-handler\-errors
+option lets scripts tolerate soft errors without shutting down. 
+
+
+.SS PERMISSIONS
+
+For the normal linux-kernel-module runtime, to run the kernel objects systemtap
+builds, a user must be one of the following:
 .IP \(bu 4
 the root user;
 .IP \(bu 4
@@ -1781,22 +1881,27 @@ untrusted users to the
 or
 .I stapusr
 groups.
+
+.SS SECUREBOOT
+
+If the current system has SecureBoot turned on in the UEFI firmware,
+all kernel modules must be signed.  (Some kernels may allow disabling
+SecureBoot long after booting with a key sequence such as SysRq-X,
+making it unnecessary to sign modules.)  The systemtap compile server
+can sign modules with a MOK (Machine Owner Key) that it has in common
+with a client system. See the following wiki page for more details:
 .PP
-The translator asserts certain safety constraints.  It aims to ensure
-that no handler routine can run for very long, allocate memory,
-perform unsafe operations, or in unintentionally interfere with the
-kernel.  Uses of script global variables are automatically read/write 
-locked as appropriate, to protect against manipulation by concurrent probe
-handlers.  (Deadlocks are detected with timeouts.  Use the 
-.BR \-t
-flag to receive reports of excessive lock contention.)  Use of guru mode
-constructs such as embedded C can violate these constraints, leading
-to kernel crash or data corruption.
-.PP
-The resource use limits are set by macros in the generated C code.
-These may be overridden with the
+.RS
+.nh
+.BR https://sourceware.org/systemtap/wiki/SecureBoot
+.hy
+.RE
+
+.SS RESOURCE LIMITS
+Many resource use limits are set by macros in the generated C code.
+These may be overridden with 
 .BR \-D
-flag.  A selection of these is as follows:
+flags.  A selection of these is as follows:
 .TP
 MAXNESTING
 Maximum number of nested function calls.  Default determined by
@@ -1814,6 +1919,8 @@ MAXACTION
 Maximum number of statements to execute during any single probe hit
 (with interrupts disabled),
 default 1000.
+Note that for straight-through probe handlers lacking loops or recursion,
+due to optimization, this parameter may be interpreted too conservatively.
 .TP
 MAXACTION_INTERRUPTIBLE
 Maximum number of statements to execute during any single probe hit
@@ -1857,7 +1964,7 @@ for the probe handler's own needs, plus a safety margin.
 MAXUPROBES
 Maximum number of concurrently armed user-space probes (uprobes), default
 somewhat larger than the number of user-space probe points named in the script.
-This pool needs to be potentialy large because individual uprobe objects (about
+This pool needs to be potentially large because individual uprobe objects (about
 64 bytes each) are allocated for each process for each matching script-level probe.
 .TP
 STP_MAXMEMORY
@@ -1865,7 +1972,13 @@ Maximum amount of memory (in kilobytes) that the systemtap module
 should use, default unlimited.  The memory size includes the size of
 the module itself, plus any additional allocations.  This only tracks
 direct allocations by the systemtap runtime.  This does not track
-indirect allocations (as done by kprobes/uprobes/etc. internals). 
+indirect allocations (as done by kprobes/uprobes/etc. internals).
+.TP
+STP_OVEROAD_THRESHOLD, STP_OVERLOAD_INTERVAL
+Maximum number of machine cycles spent in probes on any cpu per given
+interval, before an overload condition is declared and the script shut
+down.  The defaults are 500 million and 1 billion, so as to limit stap
+script cpu consumption at around 50%.
 .TP
 STP_PROCFS_BUFSIZE
 Size of procfs probe read buffers (in bytes).  Defaults to
@@ -1908,20 +2021,9 @@ user processes, and remove the active probe kernel module with
 .IR rmmod .
 Any pending trace messages may be lost.
 
-.PP
-In addition to the methods outlined above, the generated kernel module
-also uses overload processing to make sure that probes can't run for
-too long.  If more than STP_OVERLOAD_THRESHOLD cycles (default
-500000000) have been spent in all the probes on a single cpu during
-the last STP_OVERLOAD_INTERVAL cycles (default 1000000000), the probes
-have overloaded the system and an exit is triggered.
-.PP
-By default, overload processing is turned on for all modules.  If you
-would like to disable overload processing, define STP_NO_OVERLOAD (or
-its alias STAP_NO_OVERLOAD).
-
 .SH UNPRIVILEGED USERS
 
+.PP
 Systemtap exposes kernel internal data
 structures and potentially private user information. Because of this, use of
 systemtap's full capabilities are restricted to root and to users who are
@@ -1981,7 +2083,7 @@ timer.{jiffies,s,sec,ms,msec,us,usec,ns,nsec}(n)*
 timer.hz(n)
 .RE
 
-.SS SCRIPTING LANGUAGE RESTRICTIONS
+.SS SCRIPT LANGUAGE RESTRICTIONS
 The following scripting language features are unavailable to all unprivileged users:
 
 .RS
@@ -2066,6 +2168,7 @@ group stapusr.
 
 .SH ALTERNATE RUNTIMES
 
+.PP
 As described above, systemtap's default runtime mode involves building and
 loading kernel modules, with various security tradeoffs presented.  Systemtap
 now includes a new prototype backend, selected with \fI\-\-runtime=dyninst\fR,
