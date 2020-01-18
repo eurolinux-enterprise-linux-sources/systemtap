@@ -1,0 +1,40 @@
+From c3023bef537648b282f266878ea8de7a350b3a45 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Fri, 9 Nov 2018 16:42:21 -0500
+Subject: [PATCH 28/32] testcase for PR23875
+
+This triggers a 'stack smashing' error in the userspace interpreter.
+
+* testsuite/systemtap.bpf/bpf_tests/pr23875.stp: New testcase.
+---
+ testsuite/systemtap.bpf/bpf_tests/pr23875.stp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+ create mode 100644 testsuite/systemtap.bpf/bpf_tests/pr23875.stp
+
+diff --git a/testsuite/systemtap.bpf/bpf_tests/pr23875.stp b/testsuite/systemtap.bpf/bpf_tests/pr23875.stp
+new file mode 100644
+index 000000000..a31f1d087
+--- /dev/null
++++ b/testsuite/systemtap.bpf/bpf_tests/pr23875.stp
+@@ -0,0 +1,18 @@
++global t
++
++probe begin {
++  printf("BEGIN\n")
++}
++
++probe kernel.function("vfs_read") {
++  t["key"] = 6
++  exit()
++}
++
++probe end {
++  c = 0
++  foreach (k in t)
++    c++
++  printf("%d\n", c)
++  printf("END PASS\n")
++}
+-- 
+2.14.5
+

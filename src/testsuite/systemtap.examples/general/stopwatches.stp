@@ -1,5 +1,5 @@
 #! /usr/bin/env stap
-# Copyright (C) 2012 Red Hat, Inc.
+# Copyright (C) 2012-2018 Red Hat, Inc.
 # by William Cohen <wcohen@redhat.com>
 #
 # exercise the stopwatch tapset
@@ -12,14 +12,14 @@ probe begin
   stop_stopwatch("system")
 }
 
-probe syscall.*
+probe syscall_any
 {
   if (pid() != target()) next
   stop_stopwatch("user")
   start_stopwatch("system")
 }
 
-probe syscall.*.return
+probe syscall_any.return
 {
   if (pid() != target()) next
   start_stopwatch("user")

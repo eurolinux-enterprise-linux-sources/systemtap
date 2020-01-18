@@ -1,0 +1,36 @@
+From ed0fac0c88da94f40f826a41cc87d0d9d7620f34 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 13 Nov 2018 13:07:52 -0500
+Subject: [PATCH 31/32] PR23875: another testcase that loops indefinitely
+
+---
+ testsuite/systemtap.bpf/bpf_tests/pr23875_loop.stp            | 11 +++++++++++
+ .../bpf_tests/{pr23875.stp => pr23875_smash.stp}              |  0
+ 2 files changed, 11 insertions(+)
+ create mode 100644 testsuite/systemtap.bpf/bpf_tests/pr23875_loop.stp
+ rename testsuite/systemtap.bpf/bpf_tests/{pr23875.stp => pr23875_smash.stp} (100%)
+
+diff --git a/testsuite/systemtap.bpf/bpf_tests/pr23875_loop.stp b/testsuite/systemtap.bpf/bpf_tests/pr23875_loop.stp
+new file mode 100644
+index 000000000..5912ebf8c
+--- /dev/null
++++ b/testsuite/systemtap.bpf/bpf_tests/pr23875_loop.stp
+@@ -0,0 +1,11 @@
++global t
++
++probe begin {
++  println("BEGIN")
++  t["key"] = 6
++}
++
++probe end {
++  foreach (k in t) printf("%s -> %d\n", k, t[k])
++  println("END PASS")
++}
+diff --git a/testsuite/systemtap.bpf/bpf_tests/pr23875.stp b/testsuite/systemtap.bpf/bpf_tests/pr23875_smash.stp
+similarity index 100%
+rename from testsuite/systemtap.bpf/bpf_tests/pr23875.stp
+rename to testsuite/systemtap.bpf/bpf_tests/pr23875_smash.stp
+-- 
+2.14.5
+

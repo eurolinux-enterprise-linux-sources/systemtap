@@ -1,5 +1,5 @@
 #! /usr/bin/env stap
-# Copyright (C) 2014 Red Hat, Inc.
+# Copyright (C) 2014-2018 Red Hat, Inc.
 # by Josh Stone <jistone@redhat.com>
 #
 # pstree.stp generates a process diagram in DOT form.  For instance, it may be
@@ -56,7 +56,7 @@ probe syscall.execve.return
   if (!(exe_name_ctr[tid()]))
     delete exe_name_ctr[tid()]
   
-  if ($return == 0 && pid() in depth) {
+  if (retval == 0 && pid() in depth) {
     d = ++depth[pid()]
     printf("PID%d_%d -> PID%d_%d [ style=\"dashed\" ];\n",
            pid(), d-1, pid(), d)

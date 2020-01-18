@@ -1,5 +1,5 @@
 #! /usr/bin/env stap
-# Copyright (C) 2009 Red Hat, Inc.
+# Copyright (C) 2009-2018 Red Hat, Inc.
 # Written by Ulrich Drepper <drepper@redhat.com>
 # Modified by William Cohen <wcohen@redhat.com>
 
@@ -12,7 +12,7 @@ probe syscall.{poll,epoll_wait} {
 }
 
 probe syscall.poll.return {
-  if ($return == 0 && to[pid()] > 0 ) {
+  if (retval == 0 && to[pid()] > 0 ) {
     poll_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -21,7 +21,7 @@ probe syscall.poll.return {
 }
 
 probe syscall.epoll_wait.return {
-  if ($return == 0 && to[pid()] > 0 ) {
+  if (retval == 0 && to[pid()] > 0 ) {
     epoll_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -30,7 +30,7 @@ probe syscall.epoll_wait.return {
 }
 
 probe syscall.select.return {
-  if ($return == 0) {
+  if (retval == 0) {
     select_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -38,7 +38,7 @@ probe syscall.select.return {
 }
 
 probe syscall.futex.return {
-  if (errno_str($return) == "ETIMEDOUT") {
+  if (errno_str(retval) == "ETIMEDOUT") {
     futex_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -46,7 +46,7 @@ probe syscall.futex.return {
 }
 
 probe syscall.nanosleep.return {
-  if ($return == 0) {
+  if (retval == 0) {
     nanosleep_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -60,7 +60,7 @@ probe kernel.function("it_real_fn") {
 }
 
 probe syscall.rt_sigtimedwait.return {
-  if (errno_str($return) == "EAGAIN") {
+  if (errno_str(retval) == "EAGAIN") {
     signal_timeout[pid()]++
     timeout_count[pid()]++
     process[pid()] = execname()
@@ -91,4 +91,21 @@ probe timer.s(1) {
               futex_timeout[p], nanosleep_timeout[p],
               signal_timeout[p], process[p])
   }
+}
+
+global prom_arr
+
+probe prometheus {
+  foreach (p in timeout_count- limit 20) {
+    prom_arr[poll_timeout[p], select_timeout[p],
+             epoll_timeout[p], itimer_timeout[p],
+	     futex_timeout[p], nanosleep_timeout[p],
+	     signal_timeout[p]] = process[p]
+  }
+
+  @prometheus_dump_array7(prom_arr, "process", "poll_timeout", "select_timeout",
+		          "epoll_timeout", "itimer_timeout",
+			  "futex_timeout", "nanosleep_timeout",
+			  "signal_timeout")
+  delete prom_arr
 }

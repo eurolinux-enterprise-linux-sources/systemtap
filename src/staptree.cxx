@@ -1,5 +1,5 @@
 // parse tree functions
-// Copyright (C) 2005-2016 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -520,7 +520,10 @@ void atvar_op::print (ostream& o) const
 {
   if (addressof)
     o << "&";
-  o << name << "(\"" << target_name << "\")";
+  o << name << "(\"" << target_name << "\"";
+  if (module.length() > 0)
+    o << ", " << lex_cast_qstring (module);
+  o << ')';
   for (unsigned i = 0; i < components.size(); ++i)
     o << components[i];
 }
@@ -1301,13 +1304,19 @@ void null_statement::print (ostream& o) const
 
 void expr_statement::print (ostream& o) const
 {
-  o << *value;
+  if (value)
+    o << *value;
+  else
+    o << ";"; /* mid-elision-pass null-statement */
 }
 
 
 void return_statement::print (ostream& o) const
 {
-  o << "return " << *value;
+  if (value)
+    o << "return " << *value;
+  else
+    o << "return";
 }
 
 
@@ -1333,8 +1342,8 @@ void continue_statement::print (ostream& o) const
 
 void if_statement::print (ostream& o) const
 {
-  o << "if (" << *condition << ") "
-    << *thenblock << endl;
+  o << "if (" << *condition << ") ";
+  if (thenblock) o << *thenblock; else o << ";"; o << endl;
   if (elseblock)
     o << "else " << *elseblock << endl;
 }
@@ -1958,7 +1967,8 @@ traversing_visitor::visit_foreach_loop (foreach_loop* s)
 void
 traversing_visitor::visit_return_statement (return_statement* s)
 {
-  s->value->visit (this);
+  if (s->value)
+    s->value->visit (this);
 }
 
 void
@@ -2549,34 +2559,9 @@ varuse_collecting_visitor::visit_embeddedcode (embeddedcode *s)
         }
     }
 
-  // Don't allow embedded C functions in unprivileged mode unless
-  // they are tagged with /* unprivileged */ or /* myproc-unprivileged */
-  // or we're in a usermode runtime.
-  if (! pr_contains (session.privilege, pr_stapdev) &&
-      ! pr_contains (session.privilege, pr_stapsys) &&
-      ! session.runtime_usermode_p () &&
-      s->code.find ("/* unprivileged */") == string::npos &&
-      s->code.find ("/* myproc-unprivileged */") == string::npos)
-    throw SEMANTIC_ERROR (_F("function may not be used when --privilege=%s is specified",
-			     pr_name (session.privilege)),
-			  current_function->tok);
-
-  // Allow only /* bpf */ functions in bpf mode.
-  if ((session.runtime_mode == systemtap_session::bpf_runtime)
-      != (s->code.find ("/* bpf */") != string::npos))
-    {
-      if (session.runtime_mode == systemtap_session::bpf_runtime)
-	throw SEMANTIC_ERROR (_("function may not be used with bpf runtime"),
-                              current_function->tok);
-      else
-	throw SEMANTIC_ERROR (_("function requires bpf runtime"),
-                              current_function->tok);
-    }
-
-  // Don't allow /* guru */ functions unless -g is active.
-  if (!session.guru_mode && s->code.find ("/* guru */") != string::npos)
-    throw SEMANTIC_ERROR (_("function may not be used unless -g is specified"),
-			  current_function->tok);
+  // NB: we used to do security/safety checks here, which are now over
+  // in elaborate.cxx functioncall_security_check because they may be
+  // call-site-sensitive.
 
   // PR14524: Support old-style THIS->local syntax on per-function basis.
   if (s->code.find ("/* unmangled */") != string::npos)

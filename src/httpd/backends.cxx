@@ -1,5 +1,5 @@
 // systemtap compile-server server backends.
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -202,6 +202,9 @@ private:
     string build_docker_file_script_path;
 
     container_image_cache image_cache;
+
+    // The current user's uid/gid.
+    string uid_gid_str;
 };
 
 
@@ -268,6 +271,11 @@ container_backend::container_backend()
     struct utsname buf;
     (void)uname(&buf);
     arch = buf.machine;
+
+    // Figure out our uid/gid, for use in a "chown" command.
+    ostringstream out;
+    out << getuid() << ":" << getgid();
+    uid_gid_str = out.str();
 }
 
 bool
@@ -339,20 +347,18 @@ container_backend::generate_module(const client_request_data *crd,
     // that if we reuse the container we're about to build, no files
     // from this run could "leak" over into a new run with the same
     // container.
-    char tmpdir_template[PATH_MAX];
-    snprintf(tmpdir_template, PATH_MAX, "%s/stap-client.XXXXXX",
-	     getenv("TMPDIR") ?: "/tmp");
-    char *tmpdir_ptr = mkdtemp(tmpdir_template);
-    if (tmpdir_ptr == NULL) {
+    string docker_tmpdir_path = crd->server_dir + "/docker_file";
+    if (mkdir(docker_tmpdir_path.c_str(), 0700) != 0) {
 	// Return an error.
-	server_error(_F("mkdtemp failed: %s", strerror(errno)));
+	server_error(_F("mkdir(%s) failed: %s", docker_tmpdir_path.c_str(),
+			strerror(errno)));
 	return -1;
     }
 
     vector<string> cmd_args;
-#if defined(PYTHON3_BASENAME)
+#if defined(PYTHON3_EXISTS)
     cmd_args.push_back(PYTHON3_BASENAME);
-#elif defined(PYTHON_BASENAME)
+#elif defined(PYTHON_EXISTS)
     cmd_args.push_back(PYTHON_BASENAME);
 #else
 #error "Couldn't find python version 2 or 3."
@@ -365,7 +371,7 @@ container_backend::generate_module(const client_request_data *crd,
     cmd_args.push_back("--data-dir");
     cmd_args.push_back(datadir);
     cmd_args.push_back("--dest-dir");
-    cmd_args.push_back(tmpdir_ptr);
+    cmd_args.push_back(docker_tmpdir_path);
     int rc = execute_and_capture(2, cmd_args, vector<std::string> (),
 				 container_stdout_path, container_stderr_path);
     server_error(_F("Spawned process returned %d", rc));
@@ -375,7 +381,7 @@ container_backend::generate_module(const client_request_data *crd,
 	return -1;
     }
 
-    string docker_file_path = string(tmpdir_ptr) + "/base.docker";
+    string docker_file_path = docker_tmpdir_path + "/base.docker";
     string hash;
     if (get_file_hash(docker_file_path, hash) != 0) {
 	server_error(_F("unable to has file %s", docker_file_path.c_str()));
@@ -405,6 +411,7 @@ container_backend::generate_module(const client_request_data *crd,
 	// with the new image name (to help keep track of the last
 	// time the image was used).
 	cmd_args.clear();
+	cmd_args.push_back("sudo");
 	cmd_args.push_back(buildah_path);
 	cmd_args.push_back("tag");
 	cmd_args.push_back(image_id);
@@ -420,13 +427,14 @@ container_backend::generate_module(const client_request_data *crd,
     else {
 	// Kick off building the container image.
 	cmd_args.clear();
+	cmd_args.push_back("sudo");
 	cmd_args.push_back(buildah_path);
 	cmd_args.push_back("bud");
 	cmd_args.push_back("-t");
 	cmd_args.push_back(stap_image_name);
 	cmd_args.push_back("-f");
 	cmd_args.push_back(docker_file_path);
-	cmd_args.push_back(tmpdir_ptr);
+	cmd_args.push_back(docker_tmpdir_path);
 	rc = execute_and_capture(2, cmd_args, vector<std::string> (),
 				 container_stdout_path, container_stderr_path);
 	server_error(_F("Spawned process returned %d", rc));
@@ -436,14 +444,6 @@ container_backend::generate_module(const client_request_data *crd,
 	}
 	image_cache.add(hash, stap_image_name);
     }
-
-    // We're done with the temporary directory we created above.
-    vector<string> cleanupcmd { "rm", "-rf", tmpdir_ptr };
-    rc = stap_system(0, cleanupcmd);
-    if (rc != 0)
-	server_error (_("Error in tmpdir cleanup"));
-    if (crd->verbose > 1)
-	server_error(_F("Removed temporary directory \"%s\"", tmpdir_ptr));
 
     // We need a unique name for the container that "buildah run stap
     // ..." will create, so grab another uuid.
@@ -455,6 +455,7 @@ container_backend::generate_module(const client_request_data *crd,
     // out of the container, we're just going to bind mount the temp
     // directory into the container.
     cmd_args.clear();
+    cmd_args.push_back("sudo");
     cmd_args.push_back(buildah_path);
     cmd_args.push_back("from");
     cmd_args.push_back("--name");
@@ -483,6 +484,7 @@ container_backend::generate_module(const client_request_data *crd,
     // needs to be /tmp/FOO for stap to run successfully (for some odd
     // reason).
     cmd_args.clear();
+    cmd_args.push_back("sudo");
     cmd_args.push_back(buildah_path);
     cmd_args.push_back("config");
     for (auto i = crd->env_vars.begin(); i < crd->env_vars.end(); ++i) {
@@ -502,6 +504,7 @@ container_backend::generate_module(const client_request_data *crd,
 
     // Now start the container and run stap.
     cmd_args.clear();
+    cmd_args.push_back("sudo");
     cmd_args.push_back(buildah_path);
     cmd_args.push_back("run");
     cmd_args.push_back(stap_container_uuid);
@@ -511,6 +514,27 @@ container_backend::generate_module(const client_request_data *crd,
     }
     int saved_rc = execute_and_capture(2, cmd_args, vector<std::string> (),
 				       stdout_path, stderr_path);
+    server_error(_F("Spawned process returned %d", saved_rc));
+    if (saved_rc != 0) {
+	server_error("buildah run failed.");
+    }
+
+    // We've run stap, and now we need to do some cleanup. Since some
+    // files get owned by root, the 'stap-http-server' user will have
+    // trouble deleting them. So, let's change owner/group of the
+    // files from inside the container (where we're root).
+    cmd_args.clear();
+    cmd_args.push_back("sudo");
+    cmd_args.push_back(buildah_path);
+    cmd_args.push_back("run");
+    cmd_args.push_back(stap_container_uuid);
+    cmd_args.push_back("--");
+    cmd_args.push_back("chown");
+    cmd_args.push_back("-R");
+    cmd_args.push_back(uid_gid_str);
+    cmd_args.push_back(crd->client_dir);
+    rc = execute_and_capture(2, cmd_args, vector<std::string> (),
+			     stdout_path, stderr_path);
     server_error(_F("Spawned process returned %d", rc));
     if (rc != 0) {
 	server_error("buildah run failed.");
@@ -554,6 +578,7 @@ container_backend::generate_module(const client_request_data *crd,
 
     if (! containers_to_remove.empty()) {
 	cmd_args.clear();
+	cmd_args.push_back("sudo");
 	cmd_args.push_back(buildah_path);
 	cmd_args.push_back("rm");
 	for (auto i = containers_to_remove.begin();
@@ -570,6 +595,7 @@ container_backend::generate_module(const client_request_data *crd,
     }
     if (! images_to_remove.empty()) {
 	cmd_args.clear();
+	cmd_args.push_back("sudo");
 	cmd_args.push_back(buildah_path);
 	cmd_args.push_back("rmi");
 	for (auto i = images_to_remove.begin(); i != images_to_remove.end();
@@ -601,6 +627,7 @@ container_image_cache::initialize(const string &bp)
     vector<string> cmd_args;
     ostringstream out;
 
+    cmd_args.push_back("sudo");
     cmd_args.push_back(buildah_path);
     cmd_args.push_back("images");
     cmd_args.push_back("--json");

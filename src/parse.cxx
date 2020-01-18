@@ -1,5 +1,5 @@
 // recursive descent parser for systemtap scripts
-// Copyright (C) 2005-2016 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2006 Intel Corporation.
 // Copyright (C) 2007 Bull S.A.S
 // Copyright (C) 2014 Peter Kjellstrom <cap@nsc.liu.se>
@@ -208,6 +208,8 @@ private: // nonterminals
   expression* parse_defined_op (const token* t);
   expression* parse_const_op (const token* t);
   expression* parse_perf_op (const token* t);
+  expression* parse_target_register (const token* t);
+  expression* parse_target_deref (const token* t);
   expression* parse_expression ();
   expression* parse_assignment ();
   expression* parse_ternary ();
@@ -731,6 +733,7 @@ stapfile*
 parser::parse_library_macros ()
 {
   stapfile* f = new stapfile;
+  f->privileged = this->privileged;
   input.set_current_file (f);
 
   try
@@ -1457,6 +1460,13 @@ lexer::lexer (istream& input, const string& in, systemtap_session& s, bool cc):
           atwords.insert("const");
           atwords.insert("variance");
         }
+      if (has_version("4.0"))
+        {
+          atwords.insert("kregister");
+          atwords.insert("uregister");
+          atwords.insert("kderef");
+          atwords.insert("uderef");
+        }
     }
 }
 
@@ -1900,6 +1910,7 @@ stapfile*
 parser::parse ()
 {
   stapfile* f = new stapfile;
+  f->privileged = this->privileged;
   input.set_current_file (f);
 
   bool empty = true;
@@ -2002,6 +2013,7 @@ parser::parse_synthetic_probe (const token* chain)
 {
   probe* p = NULL;
   stapfile* f = new stapfile;
+  f->privileged = this->privileged;
   f->synthetic = true;
   input.set_current_file (f);
   input.set_current_token_chain (chain);
@@ -2464,7 +2476,11 @@ parser::do_parse_functiondecl (vector<functiondecl*>& functions, const token* t,
     {
       swallow();
       literal* literal = parse_literal();
-      fd->priority = dynamic_cast<literal_number*>(literal)->value;
+      literal_number* ln = dynamic_cast<literal_number*>(literal);
+      if (ln == 0)
+	throw PARSE_ERROR (_("expected literal number"));
+      fd->priority = ln->value;
+      
       // reserve priority 0 for user script implementation
       if (fd->priority < 1)
         throw PARSE_ERROR (_("specified priority must be > 0"));
@@ -2852,7 +2868,12 @@ parser::parse_return_statement ()
     throw PARSE_ERROR (_("found 'return' not in function context"));
   return_statement* s = new return_statement;
   s->tok = t;
-  s->value = parse_expression ();
+
+  t = peek ();
+  if (t->type == tok_operator && (t->content == ";" || t->content == "}"))
+    s->value = NULL;  // no return value
+  else
+    s->value = parse_expression ();
   return s;
 }
 
@@ -3270,7 +3291,10 @@ parser::parse_ternary ()
         throw PARSE_ERROR (_("expected ':'"));
       swallow ();
 
-      e->falsevalue = parse_expression (); // XXX
+      if (input.has_version("4.0"))
+        e->falsevalue = parse_ternary ();
+      else
+        e->falsevalue = parse_expression ();
       return e;
     }
   else
@@ -3678,8 +3702,17 @@ parser::parse_dwarf_value ()
     // '&' on old version only allowed specific target_symbol types
     throw PARSE_ERROR (_("expected @cast, @var or $var"));
   else
-    // Otherwise just get a plain value of any sort.
-    expr = parse_value ();
+    {
+      // Otherwise just get a plain value of any sort.
+      expr = parse_value ();
+      if (addressof)
+        {
+          tsym = dynamic_cast<target_symbol*> (expr);
+          if (tsym && tsym->addressof)
+            throw PARSE_ERROR (_("cannot take address more than once"),
+                               addrtok);
+        }
+    }
 
   // If we had '&' or see any target suffixes, that forces a target_symbol.
   // For compatibility, we only do this starting with 2.6.
@@ -3818,6 +3851,15 @@ expression* parser::parse_symbol ()
 
       if (name == "@perf")
         return parse_perf_op (t);
+
+      if (input.has_version("4.0"))
+        {
+          if (name == "@kregister" || name == "@uregister")
+            return parse_target_register (t);
+
+          if (name == "@kderef" || name == "@uderef")
+            return parse_target_deref (t);
+        }
 
       if (name.size() > 0 && name[0] == '@')
 	{
@@ -4180,6 +4222,41 @@ expression* parser::parse_perf_op (const token* t)
   return pop;
 }
 
+// Parse a @kregister or @uregister.  Given head token has already been consumed.
+expression* parser::parse_target_register (const token* t)
+{
+  target_register *treg = new target_register;
+  int64_t regno;
+  treg->tok = t;
+  treg->userspace_p = (t->content[1] == 'u');
+  if (! treg->userspace_p && ! privileged)
+    throw PARSE_ERROR (_("using @kregister operator not permitted; need stap -g"),
+                       false /* don't skip tokens for parse resumption */);
+  expect_op("(");
+  expect_number(regno);
+  treg->regno = regno;
+  expect_op(")");
+  return treg;
+}
+
+// Parse a @kderef or @uderef.  Given head token has already been consumed.
+expression* parser::parse_target_deref (const token* t)
+{
+  target_deref *tderef = new target_deref;
+  int64_t size;
+  tderef->tok = t;
+  tderef->userspace_p = (t->content[1] == 'u');
+  if (! tderef->userspace_p && ! privileged)
+    throw PARSE_ERROR (_("using @kderef operator not permitted; need stap -g"),
+                       false /* don't skip tokens for parse resumption */);
+  expect_op("(");
+  expect_number(size);
+  tderef->size = size;
+  expect_op(",");
+  tderef->addr = parse_expression();
+  expect_op(")");
+  return tderef;
+}
 
 bool
 parser::peek_target_symbol_components ()

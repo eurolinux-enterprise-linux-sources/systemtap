@@ -1,0 +1,115 @@
+From df2e44cd4a35c0cbba528e1d5821d5cd14cb7a87 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Mon, 1 Oct 2018 15:39:00 -0400
+Subject: [PATCH 03/32] stapbpf assembler WIP #2 :: testcases (no driver so
+ far)
+
+---
+ testsuite/systemtap.bpf/asm_tests/branch.stp    | 22 ++++++++++++++++++++++
+ testsuite/systemtap.bpf/asm_tests/err_token.stp | 21 +++++++++++++++++++++
+ testsuite/systemtap.bpf/asm_tests/leniency.stp  | 17 +++++++++++++++++
+ testsuite/systemtap.bpf/asm_tests/simple.stp    | 11 +++++++++++
+ 4 files changed, 71 insertions(+)
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/branch.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/err_token.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/leniency.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/simple.stp
+
+diff --git a/testsuite/systemtap.bpf/asm_tests/branch.stp b/testsuite/systemtap.bpf/asm_tests/branch.stp
+new file mode 100644
+index 000000000..aa22bf195
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/branch.stp
+@@ -0,0 +1,22 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* if x <= 10 then 50 else 100 */
++  0xd5, $x, -, _bar, 10; /* jsle $x, 10, _bar */
++  0xb7, $$, -, -, 100; /* mov $$, 100 */
++  0x05, -, -, _done, -; /* ja _done; */
++  label, _bar;
++  0xb7, $$, -, -, 50; /* mov $$, 50 */
++  label, _done;
++  /* 0xbf, $$, $$, -, -; /* dummy op */
++%}
++
++function bar:long (x:long) {
++  if (x <= 10) return 50 else return 100
++}
++
++probe begin {
++  printf("foo(1)=%d should be %d\n", foo(1), bar(1))
++  printf("foo(8)=%d should be %d\n", foo(8), bar(8))
++  printf("foo(15)=%d should be %d\n", foo(15), bar(15))
++  exit()
++}
++
+diff --git a/testsuite/systemtap.bpf/asm_tests/err_token.stp b/testsuite/systemtap.bpf/asm_tests/err_token.stp
+new file mode 100644
+index 000000000..b9f8bd866
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/err_token.stp
+@@ -0,0 +1,21 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* if x <= 10 then 50 else 100 */
++  0xd5, $x, -, _bar, 10; /* jsle $x, 10, _bar */
++  0xb7, $$, -, -, 100; /* mov $$, 100 */
++  florb, -, -, _done, -; /* TRIGGER ERROR */
++  label, _bar;
++  0xb7, $$, -, -, 50; /* mov $$, 50 */
++  label, _done;
++  /* 0xbf, $$, $$, -, -; /* dummy op */
++%}
++
++function bar:long (x:long) {
++  if (x <= 10) return 50 else return 100
++}
++
++probe begin {
++  printf("foo(1)=%d should be %d\n", foo(1), bar(1))
++  printf("foo(8)=%d should be %d\n", foo(8), bar(8))
++  printf("foo(15)=%d should be %d\n", foo(15), bar(15))
++  exit()
++}
+diff --git a/testsuite/systemtap.bpf/asm_tests/leniency.stp b/testsuite/systemtap.bpf/asm_tests/leniency.stp
+new file mode 100644
+index 000000000..939061158
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/leniency.stp
+@@ -0,0 +1,17 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* if x < 10 then 17 else 16 */
++  0xa5, $x, -, _bar, 10; /* jlt $x, 10, _bar */
++  0xb7, $this is an "!!ide\nt!!"   believe it or not, -, -, 16; /* mov $t, 0 */
++  0xbf, $$, $thisisan"!!ide\nt!!"believeitornot, -, -; /* mov $$, $t */
++  0x05, -, -, _done, -; /* ja _done; */
++  label, _bar;
++  0xb7, $$, -, -, 17; /* mov $$, 1 */
++  label, _done;
++%}
++
++probe begin {
++  printf("foo(1)=%d\n", foo(1))
++  printf("foo(15)=%d\n", foo(15))
++  exit()
++}
++
+diff --git a/testsuite/systemtap.bpf/asm_tests/simple.stp b/testsuite/systemtap.bpf/asm_tests/simple.stp
+new file mode 100644
+index 000000000..693219d15
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/simple.stp
+@@ -0,0 +1,11 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* compute 100-x */
++  0xb7, $$, -, -, 100; /* mov $$, ee */
++  0x1f, $$, $x, -, -; /* sub $$, $x */
++%}
++
++probe begin {
++  printf("foo(1)=%d\n", foo(1))
++  printf("foo(15)=%d\n", foo(15))
++  exit()
++}
+-- 
+2.14.5
+

@@ -1,5 +1,5 @@
 // C++ interface to dwfl
-// Copyright (C) 2005-2015 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2005-2007 Intel Corporation.
 // Copyright (C) 2008 James.Bottomley@HansenPartnership.com
 //
@@ -1924,7 +1924,13 @@ dwflpp::iterate_over_srcfile_lines<void>(char const * srcfile,
       suggest_alternative_linenos(srcfile, lineno, current_funcs);
     }
   else if (lineno_type == WILDCARD)
-    throw SEMANTIC_ERROR(_F("no line records for %s [man error::dwarf]", srcfile));
+    {
+      // PR23760: It's not an error to come across a srcfile that has
+      // no line records, if we're just happening across it as a
+      // wildcard case.  Only best effort matches are expected here.
+      //
+      // throw SEMANTIC_ERROR(_F("no line records for %s [man error::dwarf]", srcfile));
+    }
 }
 
 
@@ -2465,13 +2471,17 @@ bool
 dwflpp::function_entrypc (Dwarf_Addr * addr)
 {
   assert (function);
+
+  // assign default value
+  *addr = 0;
+
   // PR10574: reject 0, which tends to be eliminated COMDAT
   if (dwarf_entrypc (function, addr) == 0 && *addr != 0)
     return true;
 
   /* Assume the entry pc is the base address, or (if zero)
      the first address of the ranges covering this DIE.  */
-  Dwarf_Addr start, end;
+  Dwarf_Addr start = 0, end;
   if (dwarf_ranges (function, 0, addr, &start, &end) >= 0)
     {
       if (*addr == 0)

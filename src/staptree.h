@@ -1,5 +1,5 @@
 // -*- C++ -*-
-// Copyright (C) 2005-2017 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2006 Intel Corporation.
 //
 // This file is part of systemtap, and is free software.  You can
@@ -1290,9 +1290,9 @@ struct update_visitor: public visitor
 	    if (this->verbose > 3)
 	      {
 		std::clog << _("replaced ");
-		old_src->print(std::clog);
+		if (old_src) old_src->print(std::clog); else std::clog << "0";
 		std::clog << _(" with ");
-		new_src->print(std::clog);
+		if (new_src) new_src->print(std::clog); else std::clog << "0";
 		std::clog << std::endl;
 	      }
             relaxed_p = false;

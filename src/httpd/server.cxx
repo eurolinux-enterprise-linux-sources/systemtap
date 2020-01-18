@@ -9,9 +9,11 @@
 #include "server.h"
 #include <iostream>
 #include <string>
+#include <fstream>
 #include "../util.h"
 #include "utils.h"
 #include "nss_funcs.h"
+#include "../nsscommon.h"
 
 extern "C"
 {
@@ -39,7 +41,7 @@ get_key_values(void *cls, enum MHD_ValueKind /*kind*/,
         json_object *root = json_tokener_parse_verbose (value, &json_error);
         if (root == NULL)
           {
-	    server_error(json_tokener_error_desc (json_error));
+	    server_error(_F("JSON parse error: %s", json_tokener_error_desc (json_error)));
             return MHD_NO;
           }
 
@@ -135,6 +137,7 @@ struct connection_info
 
     MHD_PostProcessor *postprocessor;
     post_params_t post_params;
+    string post_data;
 
     string post_dir;
     map<string, vector<upload_file_info>> post_files;
@@ -143,7 +146,7 @@ struct connection_info
     connection_info(struct MHD_Connection *connection)
     {
         postprocessor
-	    = MHD_create_post_processor(connection, 1024,
+	    = MHD_create_post_processor(connection, 65535,
 					&connection_info::postdataiterator_shim,
 					this);
     }
@@ -207,7 +210,7 @@ connection_info::postdataiterator(enum MHD_ValueKind kind,
 				  const char */*content_type*/,
 				  const char */*transfer_encoding*/,
 				  const char *data,
-				  uint64_t /*offset*/,
+				  uint64_t offset,
 				  size_t size)
 {
     if (filename && key) {
@@ -217,15 +220,8 @@ connection_info::postdataiterator(enum MHD_ValueKind kind,
 	// If we've got a filename, we need a temporary directory to
 	// put it in. Otherwise if we're handling multiple requests at
 	// once, the requests could overwrite each other's files.
-	if (post_dir.empty()) {
-	    char tmpdir[PATH_MAX];
-	    snprintf(tmpdir, PATH_MAX, "%s/stap-server.XXXXXX",
-		     getenv("TMPDIR") ?: "/tmp");
-	    char *rc = mkdtemp(tmpdir);
-	    if (rc == NULL) {
-		return MHD_NO;
-	    }
-	    post_dir = rc;
+	if (post_dir.empty() && !make_temp_dir(post_dir)) {
+	    return MHD_NO;
 	}
 
 	// See if we've seen this key before.
@@ -274,8 +270,24 @@ connection_info::postdataiterator(enum MHD_ValueKind kind,
 	}
     }
     else if (key) {
-	string value(data, size);
-	return get_key_values(&post_params, kind, key, value.c_str());
+	// If offset is 0, this is the start of the POST
+	// data. Otherwise, a non-zero offset means this is
+	// (hopefully) the rest of the POST data.
+	if (offset == 0) {
+	    post_data = string(data, size);
+	}
+	else {
+	    post_data.append(data, size);
+	}
+	// We can't return the value of get_key_values(), since
+	// we don't know if the POST data was complete. The entire
+	// POST data could have come in the first call, or take
+	// several calls to get completely. But, if get_key_values()
+	// does succeed, we know the data was complete.
+	if (get_key_values(&post_params, kind, key, post_data.c_str())
+	    == MHD_YES) {
+	    post_data.clear();
+	}
     }
     return MHD_YES;
 }
@@ -317,6 +329,7 @@ public:
     response GET(const request &req);
     string arch;
     string cert_info;
+    string cert_pem;
 };
 
 base_dir_rh::base_dir_rh(string n) : request_handler(n)
@@ -336,7 +349,7 @@ response base_dir_rh::GET(const request &)
     // call nss_get_server_cert_info() in the base_dir_rh class
     // constructor, since NSS hasn't been initialized at that point.
     if (cert_info.empty())
-	cert_info = nss_get_server_cert_info();
+	nss_get_server_cert_info(cert_info, cert_pem);
 
     server_error("base_dir_rh::GET");
     r.status_code = 200;
@@ -344,7 +357,8 @@ response base_dir_rh::GET(const request &)
     os << "{" << endl;
     os << "  \"version\": \"" VERSION "\"," << endl;
     os << "  \"arch\": \"" << arch << "\"," << endl;
-    os << "  \"cert_info\": \"" << cert_info << "\"" << endl;
+    os << "  \"cert_info\": \"" << cert_info << "\"," << endl;
+    os << "  \"certificate\": \"" << cert_pem << "\"" << endl;
     os << "}" << endl;
     r.content = os.str();
     return r;
@@ -440,8 +454,6 @@ server::access_handler(struct MHD_Connection *connection,
 
     struct request rq_info;
     request_handler *rh = NULL;
-    server_error(_F("Looking for a matching request handler match with '%s'...",
-		    url_str.c_str()));
     {
 	// Use a lock_guard to ensure the mutex gets released even if an
 	// exception is thrown.
@@ -453,7 +465,6 @@ server::access_handler(struct MHD_Connection *connection,
 	    string url_path_re = get<0>(*it);
 	    if (regexp_match(url_str, url_path_re, rq_info.matches) == 0) {
 		rh = get<1>(*it);
-		server_error(_F("Found a match with '%s'", rh->name.c_str()));
 		break;
 	    }
 	}
@@ -491,9 +502,9 @@ server::access_handler(struct MHD_Connection *connection,
 			      con_info->post_params.end());
 	con_info->post_params.clear();
     }
+    rq_info.base_dir = con_info->post_dir;
     if (!con_info->post_files.empty()) {
 	// Copy all the POST file info into the request.
-	rq_info.base_dir = con_info->post_dir;
 	for (auto i = con_info->post_files.begin();
 	     i != con_info->post_files.end(); i++) {
 	    for (auto j = i->second.begin(); j != i->second.end(); j++) {
@@ -565,6 +576,14 @@ server::queue_response(const response &response, MHD_Connection *connection)
 void
 server::start()
 {
+    // Get the certificate and private key for use by https
+    string key_pk12;
+    string cert_pk12;
+    const string db_path = string(server_cert_db_path());
+    const string cert_nick = string(server_cert_nickname());
+    if (nss_get_server_pw_info (db_path, cert_nick, key_pk12, cert_pk12) == false)
+      throw runtime_error("Error getting certificates");
+
     dmn_ipv4 = MHD_start_daemon(MHD_USE_SELECT_INTERNALLY
 #ifdef MHD_USE_EPOLL
 				| MHD_USE_EPOLL
@@ -576,13 +595,16 @@ server::start()
 				| MHD_USE_POLL
 #endif
 #endif
-				| MHD_USE_DEBUG,
+				| MHD_USE_DEBUG
+				| MHD_USE_SSL,
 				port,
 				NULL, NULL, // default accept policy
 				&server::access_handler_shim, this,
 				MHD_OPTION_THREAD_POOL_SIZE, 4,
 				MHD_OPTION_NOTIFY_COMPLETED,
 				&server::request_completed_handler_shim, this,
+				MHD_OPTION_HTTPS_MEM_KEY, key_pk12.c_str(),
+				MHD_OPTION_HTTPS_MEM_CERT, cert_pk12.c_str(),
 				MHD_OPTION_END);
 
     if (dmn_ipv4 == NULL) {

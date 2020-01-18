@@ -84,11 +84,11 @@
 %endif
 
 # To avoid testsuite/*/*.stp has shebang which doesn't start with '/'
-%undefine __brp_mangle_shebangs  
+%define __brp_mangle_shebangs_exclude_from .stp$
 
 Name: systemtap
-Version: 3.3
-Release: 3%{?dist}
+Version: 4.0
+Release: 10%{?release_override}%{?dist}
 # for version, see also configure.ac
 
 
@@ -125,8 +125,50 @@ License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Source: ftp://sourceware.org/pub/systemtap/releases/systemtap-%{version}.tar.gz
 
+# backported patch series for RHBZ1643997, will go away after 4.1 release:
+Patch2: rhbz1643997.0001-testsuite-systemtap.bpf-diagnose-a-bug-in-print_form.patch
+Patch3: rhbz1643997.0002-stapbpf-assembler-WIP-1-basic-parser-and-control-flo.patch
+Patch4: rhbz1643997.0003-stapbpf-assembler-WIP-2-testcases-no-driver-so-far.patch
+Patch5: rhbz1643997.0004-stapbpf-assembler-WIP-3-additional-assembly-test-cas.patch
+Patch6: rhbz1643997.0005-stapbpf-assembler-WIP-4-alloc-and-helper-call-operat.patch
+Patch7: rhbz1643997.0006-stapbpf-assembler-WIP-5-basic-kernel_string-implemen.patch
+Patch8: rhbz1643997.0007-stapbpf-assembler-WIP-6-other-call-functions-s-print.patch
+Patch9: rhbz1643997.0008-stapbpf-assembler-WIP-7-fixed-kernel_string-tapset-a.patch
+Patch10: rhbz1643997.0009-stapbpf-assembler-WIP-8-bpf-asm.exp-driver-and-more-.patch
+Patch11: rhbz1643997.0010-bpf-translate.cxx-plug-an-exception-gap-in-is_numeri.patch
+Patch12: rhbz1643997.0011-session.cxx-enable-caching-for-bpf-backend.patch
+Patch13: rhbz1643997.0012-Adjust-the-BPF-translate-error-report-formatting-to-.patch
+Patch14: rhbz1643997.0013-bpf-translate.cxx-fix-segfault-with-malformed-regist.patch
+Patch15: rhbz1643997.0014-bpf-asm.exp-bugfix-bad_output-does-occur.patch
+Patch16: rhbz1643997.0015-tapset-bpf-conversions.stp-bugfix-helper-name-in-ker.patch
+Patch17: rhbz1643997.0016-tapset-bpf-context.stp-add-execname-triage-other-fun.patch
+Patch18: rhbz1643997.0017-PR23849-temporarily-disable-stapbpf-script-caching.patch
+Patch19: rhbz1643997.0018-tapset-bpf-task.stp-rudiment-of-task-tapset.patch
+Patch20: rhbz1643997.0019-PR23829-fallback-defines-__BPF_FUNC_MAPPER-and-BPF_J.patch
+Patch21: rhbz1643997.0020-PR23860-partial-fix-fix-BPF_NEG-opcode-generation.patch
+Patch22: rhbz1643997.0021-bpf-behind-the-scenes-useful-DEBUG_CODEGEN-diagnosti.patch
+Patch23: rhbz1643997.0022-standardize-ktime_get_ns-across-lkm-bpf-runtimes.patch
+Patch24: rhbz1643997.0023-pr23860-verifier-workaround-be-sure-to-delete-all-mo.patch
+Patch25: rhbz1643997.0024-PR23860-bugfix-incorrect-comparison-direction-in-str.patch
+Patch26: rhbz1643997.0025-PR23860-additional-stack-protection-for-strings.patch
+Patch27: rhbz1643997.0026-PR23860-additional-ugly-stack-clobber-protection-for.patch
+Patch28: rhbz1643997.0027-PR23860-reduce-stack-pressure-from-format-strings.patch
+Patch29: rhbz1643997.0028-testcase-for-PR23875.patch
+Patch30: rhbz1643997.0029-PR23860-bpf_interpret-NEG-should-not-fall-through-to.patch
+Patch31: rhbz1643997.0030-PR23875-bpf.exp-fail-testcase-on-stack-smashing.patch
+Patch32: rhbz1643997.0031-PR23875-another-testcase-that-loops-indefinitely.patch
+Patch33: rhbz1643997.0032-PR23875-bpf_unparser-visit_foreach_loop-temporarily-.patch
+Patch34: rhbz1656795.patch
+Patch35: rhbz1657186.patch
+Patch36: rhbz1657857.patch
+Patch37: rhbz1657909.patch
+Patch50: bpf-unwarn.patch
+Patch51: stapbpf-kmsg.patch
+Patch52: rhbz1731333.patch
+
 # Build*
 BuildRequires: gcc-c++
+BuildRequires: cpio
 BuildRequires: gettext-devel
 BuildRequires: pkgconfig(nss)
 BuildRequires: pkgconfig(avahi-client)
@@ -214,14 +256,6 @@ BuildRequires: libuuid-devel
 Requires: systemtap-client = %{version}-%{release}
 Requires: systemtap-devel = %{version}-%{release}
 
-Patch10: rhbz1547238.patch
-Patch11: rhbz1591267.patch
-Patch12: rhbz1544689.patch
-Patch13: rhbz1560044.1.patch
-Patch14: rhbz1560044.2.patch
-Patch15: rhbz1560044.3.patch
-
-
 %description
 SystemTap is an instrumentation system for systems running Linux.
 Developers can write instrumentation scripts to collect data on
@@ -236,19 +270,23 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires: systemtap-devel = %{version}-%{release}
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
+Conflicts: systemtap-client < %{version}-%{release}
 Requires: nss coreutils
 Requires: zip unzip
 Requires(pre): shadow-utils
 Requires(post): chkconfig
 Requires(preun): chkconfig
-Requires(preun): initscripts
-Requires(postun): initscripts
 BuildRequires: nss-devel avahi-devel
 %if %{with_openssl}
 Requires: openssl
 %endif
 %if %{with_systemd}
 Requires: systemd
+%else
+Requires(preun): initscripts
+Requires(postun): initscripts
 %endif
 
 %description server
@@ -262,12 +300,18 @@ Summary: Programmable system-wide instrumentation system - development headers, 
 Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
-# The virtual provide 'kernel-devel-uname-r' tries to get the right
-# kernel variant  (kernel-PAE, kernel-debug, etc.) devel package
-# installed.
+
+%if 0%{?rhel} >= 8 || 0%{?fedora} >= 20
+Recommends: kernel-debug-devel
+Recommends: kernel-devel
+%else
 Requires: kernel-devel-uname-r
-%{?fedora:Suggests: kernel-devel}
+%endif
+
 Requires: gcc make
+Conflicts: systemtap-client < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
 # Suggest: kernel-debuginfo
 
 %description devel
@@ -285,6 +329,9 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires(pre): shadow-utils
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-client < %{version}-%{release}
 
 %description runtime
 SystemTap runtime contains the components needed to execute
@@ -301,6 +348,9 @@ Requires: zip unzip
 Requires: systemtap-runtime = %{version}-%{release}
 Requires: coreutils grep sed unzip zip
 Requires: openssh-clients
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
 %if %{with_mokutil}
 Requires: mokutil
 %endif
@@ -321,8 +371,12 @@ URL: http://sourceware.org/systemtap/
 Requires: systemtap = %{version}-%{release}
 Requires(post): chkconfig
 Requires(preun): chkconfig
+%if %{with_systemd}
+Requires: systemd
+%else
 Requires(preun): initscripts
 Requires(postun): initscripts
+%endif
 
 %description initscript
 This package includes a SysVinit script to launch selected systemtap
@@ -423,8 +477,7 @@ Requires: iproute
 
 %description runtime-java
 This package includes support files needed to run systemtap scripts
-that probe Java processes running on the OpenJDK 1.6 and OpenJDK 1.7
-runtimes using Byteman.
+that probe Java processes running on the OpenJDK runtimes using Byteman.
 %endif
 
 %if %{with_python2_probes}
@@ -456,6 +509,20 @@ Obsoletes: %{name}-runtime-python2 < %{version}-%{release}
 %description runtime-python3
 This package includes support files needed to run systemtap scripts
 that probe python 3 processes.
+%endif
+
+%if %{with_python3}
+%package exporter
+Summary: Systemtap-prometheus interoperation mechanism
+Group: Development/System
+License: GPLv2+
+URL: http://sourceware.org/systemtap/
+Requires: systemtap-runtime = %{version}-%{release}
+
+%description exporter
+This package includes files for a systemd service that manages
+systemtap sessions and relays prometheus metrics from the sessions
+to remote requesters on demand.
 %endif
 
 %if %{with_virthost}
@@ -498,6 +565,7 @@ systemtap-runtime-virthost machine to execute systemtap scripts.
 # ------------------------------------------------------------------------
 
 %prep
+
 %setup -q %{?setup_elfutils}
 
 %if %{with_bundled_elfutils}
@@ -510,13 +578,46 @@ find . \( -name configure -o -name config.h.in \) -print | xargs touch
 cd ..
 %endif
 
+# backported patch series for RHBZ1643997, will go away after 4.1 release:
+%patch2 -p1
+%patch3 -p1
+%patch4 -p1
+%patch5 -p1
+%patch6 -p1
+%patch7 -p1
+%patch8 -p1
+%patch9 -p1
 %patch10 -p1
 %patch11 -p1
 %patch12 -p1
 %patch13 -p1
 %patch14 -p1
 %patch15 -p1
-
+%patch16 -p1
+%patch17 -p1
+%patch18 -p1
+%patch19 -p1
+%patch20 -p1
+%patch21 -p1
+%patch22 -p1
+%patch23 -p1
+%patch24 -p1
+%patch25 -p1
+%patch26 -p1
+%patch27 -p1
+%patch28 -p1
+%patch29 -p1
+%patch30 -p1
+%patch31 -p1
+%patch32 -p1
+%patch33 -p1
+%patch34 -p1
+%patch35 -p1
+%patch36 -p1
+%patch37 -p1
+%patch50 -p1
+%patch51 -p1
+%patch52 -p1
 
 %build
 
@@ -691,12 +792,27 @@ mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/cache/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/run/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
 install -m 644 initscript/logrotate.stap-server $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d/stap-server
+
+# If using systemd systemtap.service file, retain the old init script in %{_libexecdir} as a helper.
+%if %{with_systemd}
+mkdir -p $RPM_BUILD_ROOT%{_unitdir}
+touch $RPM_BUILD_ROOT%{_unitdir}/systemtap.service
+install -m 644 initscript/systemtap.service $RPM_BUILD_ROOT%{_unitdir}/systemtap.service
+mkdir -p $RPM_BUILD_ROOT%{_sbindir}
+install -m 755 initscript/systemtap $RPM_BUILD_ROOT%{_sbindir}/systemtap-service
+%else
 mkdir -p $RPM_BUILD_ROOT%{initdir}
 install -m 755 initscript/systemtap $RPM_BUILD_ROOT%{initdir}
+mkdir -p $RPM_BUILD_ROOT%{_sbindir}
+ln -sf %{initdir}/systemtap $RPM_BUILD_ROOT%{_sbindir}/systemtap-service
+# TODO CHECK CORRECTNESS: symlink %{_sbindir}/systemtap-service to %{initdir}/systemtap
+%endif
+
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/conf.d
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/script.d
 install -m 644 initscript/config.systemtap $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/config
+
 %if %{with_systemd}
 mkdir -p $RPM_BUILD_ROOT%{_unitdir}
 touch $RPM_BUILD_ROOT%{_unitdir}/stap-server.service
@@ -924,6 +1040,24 @@ if [ "$1" -ge "1" ]; then
 fi
 exit 0
 
+%if %{with_python3}
+%if %{with_systemd}
+%preun exporter
+if [ $1 = 0 ] ; then
+  /bin/systemctl stop stap-exporter.service >/dev/null 2>&1 || :
+  /bin/systemctl disable stap-exporter.service >/dev/null 2>&1 || :
+fi
+exit 0
+
+%postun exporter
+# Restart service if this is an upgrade rather than an uninstall
+if [ "$1" -ge "1" ]; then
+   /bin/systemctl condrestart stap-exporter >/dev/null 2>&1 || :
+fi
+exit 0
+%endif
+%endif
+
 %post
 # Remove any previously-built uprobes.ko materials
 (make -C %{_datadir}/systemtap/runtime/uprobes clean) >/dev/null 2>&1 || true
@@ -988,7 +1122,7 @@ done
 
 # ------------------------------------------------------------------------
 
-%files -f systemtap.lang
+%files
 # The master "systemtap" rpm doesn't include any files.
 
 %files server -f systemtap.lang
@@ -1132,14 +1266,20 @@ done
 
 %files initscript
 %defattr(-,root,root)
+%if %{with_systemd}
+%{_unitdir}/systemtap.service
+%{_sbindir}/systemtap-service
+%else
 %{initdir}/systemtap
+%{_sbindir}/systemtap-service
+%endif
 %dir %{_sysconfdir}/systemtap
 %dir %{_sysconfdir}/systemtap/conf.d
 %dir %{_sysconfdir}/systemtap/script.d
 %config(noreplace) %{_sysconfdir}/systemtap/config
 %dir %{_localstatedir}/cache/systemtap
 %ghost %{_localstatedir}/run/systemtap
-%{_mandir}/man8/systemtap.8*
+%{_mandir}/man8/systemtap-service.8*
 %if %{with_dracut}
    %dir %{dracutstap}
    %{dracutstap}/*
@@ -1203,6 +1343,15 @@ done
 %endif
 %endif
 
+%if %{with_python3}
+%files exporter
+%{_sysconfdir}/stap-exporter
+%{_sysconfdir}/sysconfig/stap-exporter
+%{_unitdir}/stap-exporter.service
+%{_mandir}/man8/stap-exporter.8*
+%{_sbindir}/stap-exporter
+%endif
+
 # ------------------------------------------------------------------------
 
 # Future new-release entries should be of the form
@@ -1212,6 +1361,18 @@ done
 
 # PRERELEASE
 %changelog
+* Tue Sep 03 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-10
+- rhbz1731333: nfsd.proc.write loss of vlen
+
+* Wed Apr 03 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-9
+- Backport stapbpf /dev/ksmg-related patches.
+
+* Tue Feb 26 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-8
+- Turn on with_bpf support on x86-64 only.
+
+* Tue Feb 26 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-7
+- Rebase to systemtap 4.0, add rhel8 beta-era patches
+
 * Fri Sep 14 2018 Serhei Makarov <smakarov@redhat.com> - 3.3-3
 - Add BPF left-operand fix (rhbz1560044) (x86-64 only)
 - Add stap.1 note on missing stapbpf.8 (rhbz1560044)

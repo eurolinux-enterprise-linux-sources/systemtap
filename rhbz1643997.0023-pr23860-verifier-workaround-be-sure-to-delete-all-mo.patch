@@ -1,0 +1,32 @@
+From b43a06011e0a4606504391ffb94762276c95610d Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Wed, 7 Nov 2018 13:07:51 -0500
+Subject: [PATCH 23/32] pr23860 verifier workaround :: be sure to delete all
+ mov rN,rN
+
+An apparent bug in the eBPF verifier fails to preserve register state
+when MOVing a register to itself, marking rN as 'unknown scalar'.
+
+Previously bpf-opt.cxx failed to remove spurious MOVs if they were the
+final instruction in a basic block. This would fail verification if
+the register holds a pointer.
+---
+ bpf-opt.cxx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bpf-opt.cxx b/bpf-opt.cxx
+index 904b33b46..8b9a6ea60 100644
+--- a/bpf-opt.cxx
++++ b/bpf-opt.cxx
+@@ -909,7 +909,7 @@ post_alloc_cleanup (program &p)
+ 	  n = j->next;
+ 	  if (j->is_move()
+ 	      && j->src1->is_reg()
+-	      && j->dest->reg() == j->src1->reg() && n)
++	      && j->dest->reg() == j->src1->reg())
+ 	    {
+ 	      // Delete no-op moves created by partition merging.
+ 	      insn *p = j->prev;
+-- 
+2.14.5
+

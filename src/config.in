@@ -102,6 +102,9 @@
 /* Define to 1 if you have the `openat' function. */
 #undef HAVE_OPENAT
 
+/* Define to 1 if you have the openssl libraries. */
+#undef HAVE_OPENSSL
+
 /* Define to 1 if you have the `ppoll' function. */
 #undef HAVE_PPOLL
 
@@ -165,8 +168,14 @@
 /* Base name of the python3 interpreter binary. */
 #undef PYTHON3_BASENAME
 
+/* The python3 interpreter binary exists. */
+#undef PYTHON3_EXISTS
+
 /* Base name of the python2 interpreter binary. */
 #undef PYTHON_BASENAME
+
+/* The python2 interpreter binary exists. */
+#undef PYTHON_EXISTS
 
 /* extra stap version code */
 #undef STAP_EXTRA_VERSION

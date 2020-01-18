@@ -80,11 +80,11 @@
 %endif
 
 # To avoid testsuite/*/*.stp has shebang which doesn't start with '/'
-%undefine __brp_mangle_shebangs  
+%define __brp_mangle_shebangs_exclude_from .stp$
 
 Name: systemtap
-Version: 3.3
-Release: 1%{?dist}
+Version: 4.0
+Release: 1%{?release_override}%{?dist}
 # for version, see also configure.ac
 
 
@@ -123,6 +123,7 @@ Source: ftp://sourceware.org/pub/systemtap/releases/systemtap-%{version}.tar.gz
 
 # Build*
 BuildRequires: gcc-c++
+BuildRequires: cpio
 BuildRequires: gettext-devel
 BuildRequires: pkgconfig(nss)
 BuildRequires: pkgconfig(avahi-client)
@@ -224,19 +225,23 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires: systemtap-devel = %{version}-%{release}
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
+Conflicts: systemtap-client < %{version}-%{release}
 Requires: nss coreutils
 Requires: zip unzip
 Requires(pre): shadow-utils
 Requires(post): chkconfig
 Requires(preun): chkconfig
-Requires(preun): initscripts
-Requires(postun): initscripts
 BuildRequires: nss-devel avahi-devel
 %if %{with_openssl}
 Requires: openssl
 %endif
 %if %{with_systemd}
 Requires: systemd
+%else
+Requires(preun): initscripts
+Requires(postun): initscripts
 %endif
 
 %description server
@@ -256,6 +261,9 @@ URL: http://sourceware.org/systemtap/
 Requires: kernel-devel-uname-r
 %{?fedora:Suggests: kernel-devel}
 Requires: gcc make
+Conflicts: systemtap-client < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
 # Suggest: kernel-debuginfo
 
 %description devel
@@ -273,6 +281,9 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires(pre): shadow-utils
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-client < %{version}-%{release}
 
 %description runtime
 SystemTap runtime contains the components needed to execute
@@ -289,6 +300,9 @@ Requires: zip unzip
 Requires: systemtap-runtime = %{version}-%{release}
 Requires: coreutils grep sed unzip zip
 Requires: openssh-clients
+Conflicts: systemtap-devel < %{version}-%{release}
+Conflicts: systemtap-server < %{version}-%{release}
+Conflicts: systemtap-runtime < %{version}-%{release}
 %if %{with_mokutil}
 Requires: mokutil
 %endif
@@ -309,8 +323,12 @@ URL: http://sourceware.org/systemtap/
 Requires: systemtap = %{version}-%{release}
 Requires(post): chkconfig
 Requires(preun): chkconfig
+%if %{with_systemd}
+Requires: systemd
+%else
 Requires(preun): initscripts
 Requires(postun): initscripts
+%endif
 
 %description initscript
 This package includes a SysVinit script to launch selected systemtap
@@ -411,8 +429,7 @@ Requires: iproute
 
 %description runtime-java
 This package includes support files needed to run systemtap scripts
-that probe Java processes running on the OpenJDK 1.6 and OpenJDK 1.7
-runtimes using Byteman.
+that probe Java processes running on the OpenJDK runtimes using Byteman.
 %endif
 
 %if %{with_python2_probes}
@@ -444,6 +461,20 @@ Obsoletes: %{name}-runtime-python2 < %{version}-%{release}
 %description runtime-python3
 This package includes support files needed to run systemtap scripts
 that probe python 3 processes.
+%endif
+
+%if %{with_python3}
+%package exporter
+Summary: Systemtap-prometheus interoperation mechanism
+Group: Development/System
+License: GPLv2+
+URL: http://sourceware.org/systemtap/
+Requires: systemtap-runtime = %{version}-%{release}
+
+%description exporter
+This package includes files for a systemd service that manages
+systemtap sessions and relays prometheus metrics from the sessions
+to remote requesters on demand.
 %endif
 
 %if %{with_virthost}
@@ -601,10 +632,16 @@ cd ..
 %global httpd_config --disable-httpd
 %endif
 
+%if %{with_bpf}
+%global bpf_config --with-bpf
+%else
+%global bpf_config --without-bpf
+%endif
+
 # We don't ship compileworthy python code, just oddball samples
 %global py_auto_byte_compile 0
 
-%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{rpm_config} %{java_config} %{virt_config} %{dracut_config} %{python3_config} %{python2_probes_config} %{python3_probes_config} %{httpd_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
+%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{rpm_config} %{java_config} %{virt_config} %{dracut_config} %{python3_config} %{python2_probes_config} %{python3_probes_config} %{httpd_config} %{bpf_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
 make %{?_smp_mflags}
 
 %if %{with_emacsvim}
@@ -665,12 +702,27 @@ mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/cache/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/run/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
 install -m 644 initscript/logrotate.stap-server $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d/stap-server
+
+# If using systemd systemtap.service file, retain the old init script in %{_libexecdir} as a helper.
+%if %{with_systemd}
+mkdir -p $RPM_BUILD_ROOT%{_unitdir}
+touch $RPM_BUILD_ROOT%{_unitdir}/systemtap.service
+install -m 644 initscript/systemtap.service $RPM_BUILD_ROOT%{_unitdir}/systemtap.service
+mkdir -p $RPM_BUILD_ROOT%{_sbindir}
+install -m 755 initscript/systemtap $RPM_BUILD_ROOT%{_sbindir}/systemtap-service
+%else
 mkdir -p $RPM_BUILD_ROOT%{initdir}
 install -m 755 initscript/systemtap $RPM_BUILD_ROOT%{initdir}
+mkdir -p $RPM_BUILD_ROOT%{_sbindir}
+ln -sf %{initdir}/systemtap $RPM_BUILD_ROOT%{_sbindir}/systemtap-service
+# TODO CHECK CORRECTNESS: symlink %{_sbindir}/systemtap-service to %{initdir}/systemtap
+%endif
+
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/conf.d
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/script.d
 install -m 644 initscript/config.systemtap $RPM_BUILD_ROOT%{_sysconfdir}/systemtap/config
+
 %if %{with_systemd}
 mkdir -p $RPM_BUILD_ROOT%{_unitdir}
 touch $RPM_BUILD_ROOT%{_unitdir}/stap-server.service
@@ -898,6 +950,24 @@ if [ "$1" -ge "1" ]; then
 fi
 exit 0
 
+%if %{with_python3}
+%if %{with_systemd}
+%preun exporter
+if [ $1 = 0 ] ; then
+  /bin/systemctl stop stap-exporter.service >/dev/null 2>&1 || :
+  /bin/systemctl disable stap-exporter.service >/dev/null 2>&1 || :
+fi
+exit 0
+
+%postun exporter
+# Restart service if this is an upgrade rather than an uninstall
+if [ "$1" -ge "1" ]; then
+   /bin/systemctl condrestart stap-exporter >/dev/null 2>&1 || :
+fi
+exit 0
+%endif
+%endif
+
 %post
 # Remove any previously-built uprobes.ko materials
 (make -C %{_datadir}/systemtap/runtime/uprobes clean) >/dev/null 2>&1 || true
@@ -962,7 +1032,7 @@ done
 
 # ------------------------------------------------------------------------
 
-%files -f systemtap.lang
+%files
 # The master "systemtap" rpm doesn't include any files.
 
 %files server -f systemtap.lang
@@ -1106,14 +1176,20 @@ done
 
 %files initscript
 %defattr(-,root,root)
+%if %{with_systemd}
+%{_unitdir}/systemtap.service
+%{_sbindir}/systemtap-service
+%else
 %{initdir}/systemtap
+%{_sbindir}/systemtap-service
+%endif
 %dir %{_sysconfdir}/systemtap
 %dir %{_sysconfdir}/systemtap/conf.d
 %dir %{_sysconfdir}/systemtap/script.d
 %config(noreplace) %{_sysconfdir}/systemtap/config
 %dir %{_localstatedir}/cache/systemtap
 %ghost %{_localstatedir}/run/systemtap
-%{_mandir}/man8/systemtap.8*
+%{_mandir}/man8/systemtap-service.8*
 %if %{with_dracut}
    %dir %{dracutstap}
    %{dracutstap}/*
@@ -1177,6 +1253,15 @@ done
 %endif
 %endif
 
+%if %{with_python3}
+%files exporter
+%{_sysconfdir}/stap-exporter
+%{_sysconfdir}/sysconfig/stap-exporter
+%{_unitdir}/stap-exporter.service
+%{_mandir}/man8/stap-exporter.8*
+%{_sbindir}/stap-exporter
+%endif
+
 # ------------------------------------------------------------------------
 
 # Future new-release entries should be of the form
@@ -1186,6 +1271,9 @@ done
 
 # PRERELEASE
 %changelog
+* Sat Oct 13 2018 Frank Ch. Eigler <fche@redhat.com> - 4.0-1
+- Upstream release.
+
 * Thu Jun 07 2018 Frank Ch. Eigler <fche@redhat.com> - 3.3-1
 - Upstream release.
 

@@ -1,5 +1,5 @@
 // tapset for procfs
-// Copyright (C) 2005-2017 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2005-2007 Intel Corporation.
 //
 // This file is part of systemtap, and is free software.  You can
@@ -646,6 +646,7 @@ procfs_builder::build(systemtap_session & sess,
       string::size_type start_pos, end_pos;
       interned_string component;
       start_pos = 0;
+
       while ((end_pos = path.find('/', start_pos)) != string::npos)
         {
           // Make sure it doesn't start with '/'.

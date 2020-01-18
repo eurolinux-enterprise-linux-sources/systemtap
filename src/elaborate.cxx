@@ -1,5 +1,5 @@
 // elaboration functions
-// Copyright (C) 2005-2017 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2008 Intel Corporation
 //
 // This file is part of systemtap, and is free software.  You can
@@ -439,6 +439,9 @@ match_node::find_and_build (systemtap_session& s,
                             vector<derived_probe *>& results,
                             set<string>& builders)
 {
+  save_and_restore<unsigned> costly(& s.suppress_costly_diagnostics,
+                                    s.suppress_costly_diagnostics + (loc->optional || loc->sufficient ? 1 : 0));
+  
   assert (pos <= loc->components.size());
   if (pos == loc->components.size()) // matched all probe point components so far
     {
@@ -963,24 +966,6 @@ alias_expansion_builder::checkForRecursiveExpansion (probe *use)
 // Pattern matching
 // ------------------------------------------------------------------------
 
-static unsigned max_recursion = 100;
-
-struct
-recursion_guard
-{
-  unsigned & i;
-  recursion_guard(unsigned & i) : i(i)
-    {
-      if (i > max_recursion)
-	throw SEMANTIC_ERROR(_("recursion limit reached"));
-      ++i;
-    }
-  ~recursion_guard()
-    {
-      --i;
-    }
-};
-
 // The match-and-expand loop.
 void
 derive_probes (systemtap_session& s,
@@ -1010,8 +995,8 @@ derive_probes (systemtap_session& s,
 
       probe_point *loc = p->locations[i];
 
-      if (s.verbose > 4)
-        clog << "derive-probes " << *loc << endl;
+      if (s.verbose > 1)
+        clog << "derive-probes (location #" << i << "): " << *loc << " of " << *p->tok << endl;
 
       try
         {
@@ -1109,7 +1094,9 @@ derive_probes (systemtap_session& s,
     }
 
   if (undo_parent_optional)
-    parent_optional = false;
+    {
+      parent_optional = false;
+    }
 }
 
 
@@ -1348,6 +1335,39 @@ struct stat_decl_collector
 	    i->second.bit_shift = bit_shift;
 	  }
       }
+  }
+
+  void visit_foreach_loop (foreach_loop* s)
+  {
+    symbol *array;
+    hist_op *hist;
+
+    classify_indexable (s->base, array, hist);
+
+    if (array && array->type == pe_stats
+        && s->sort_direction
+        && s->sort_column == 0)
+      {
+        int stat_op = STAT_OP_NONE;
+
+        switch (s->sort_aggr) {
+        default: case sc_none: case sc_count: stat_op = STAT_OP_COUNT; break;
+        case sc_sum: stat_op = STAT_OP_SUM; break;
+        case sc_min: stat_op = STAT_OP_MIN; break;
+        case sc_max: stat_op = STAT_OP_MAX; break;
+        case sc_average: stat_op = STAT_OP_AVG; break;
+        }
+
+        map<interned_string, statistic_decl>::iterator i
+          = session.stat_decls.find(array->name);
+
+        if (i == session.stat_decls.end())
+          session.stat_decls[array->name] = statistic_decl(stat_op);
+        else
+          i->second.stat_ops |= stat_op;
+      }
+
+    traversing_visitor::visit_foreach_loop (s);
   }
 
   void visit_assignment (assignment* e)
@@ -1716,6 +1736,10 @@ void embeddedcode_info_pass (systemtap_session& s)
   embeddedcode_info eci (s);
   for (unsigned i=0; i<s.probes.size(); i++)
     s.probes[i]->body->visit (& eci);
+
+  for (map<string,functiondecl*>::iterator it = s.functions.begin();
+       it != s.functions.end(); it++)
+    it->second->body->visit (& eci);
 }
 
 // ------------------------------------------------------------------------
@@ -2342,11 +2366,15 @@ static void monitor_mode_write(systemtap_session& s)
           if (v->type == pe_long)
             {
               literal_number* ln = dynamic_cast<literal_number*>(v->init);
+              if (ln == 0)
+                throw SEMANTIC_ERROR (_("expected literal number"), 0);
               code << v->name << " = " << ln->value << endl;
             }
           else if (v->type == pe_string)
             {
               literal_string* ln = dynamic_cast<literal_string*>(v->init);
+              if (ln == 0)
+                throw SEMANTIC_ERROR (_("expected literal string"), 0);
               code << v->name << " = " << lex_cast_qstring(ln->value) << endl;
             }
         }
@@ -2717,10 +2745,11 @@ symresolution_info::visit_functioncall (functioncall* e)
   for (unsigned i=0; i<e->args.size(); i++)
     e->args[i]->visit (this);
 
+  // already resolved?
   if (!e->referents.empty())
     return;
 
-  vector<functiondecl*> fds = find_functions (e->function, e->args.size (), e->tok);
+  vector<functiondecl*> fds = find_functions (e, e->function, e->args.size (), e->tok);
   if (!fds.empty())
     {
       e->referents = fds;
@@ -2846,8 +2875,55 @@ symresolution_info::find_var (interned_string name, int arity, const token* tok)
 }
 
 
+class functioncall_security_check: public traversing_visitor
+{
+  systemtap_session& session;
+  functioncall* call;
+  functiondecl* current_function;
+public:
+  functioncall_security_check(systemtap_session&s, functioncall* c): session(s),call(c) {}
+  void traverse (functiondecl* d)
+  {
+    current_function = d;
+    current_function->body->visit(this);
+  }
+  
+  void visit_embeddedcode (embeddedcode *s)
+  {
+  // Don't allow embedded C functions in unprivileged mode unless
+  // they are tagged with /* unprivileged */ or /* myproc-unprivileged */
+  // or we're in a usermode runtime.
+  if (! pr_contains (session.privilege, pr_stapdev) &&
+      ! pr_contains (session.privilege, pr_stapsys) &&
+      ! session.runtime_usermode_p () &&
+      s->code.find ("/* unprivileged */") == string::npos &&
+      s->code.find ("/* myproc-unprivileged */") == string::npos)
+    throw SEMANTIC_ERROR (_F("function may not be used when --privilege=%s is specified",
+			     pr_name (session.privilege)),
+			  current_function->tok);
+
+  // Allow only /* bpf */ functions in bpf mode.
+  if ((session.runtime_mode == systemtap_session::bpf_runtime)
+      != (s->code.find ("/* bpf */") != string::npos))
+    {
+      if (session.runtime_mode == systemtap_session::bpf_runtime)
+	throw SEMANTIC_ERROR (_("function may not be used with bpf runtime"),
+                              current_function->tok);
+      else
+	throw SEMANTIC_ERROR (_("function requires bpf runtime"),
+                              current_function->tok);
+    }
+
+  // Don't allow /* guru */ functions unless caller is privileged.
+  if (!call->tok->location.file->privileged && s->code.find ("/* guru */") != string::npos)
+    throw SEMANTIC_ERROR (_("function may not be used unless -g is specified"),
+			  call->tok);
+  }    
+};
+
+
 vector<functiondecl*>
-symresolution_info::find_functions (const string& name, unsigned arity, const token *tok)
+symresolution_info::find_functions (functioncall *call, const string& name, unsigned arity, const token *tok)
 {
   vector<functiondecl*> functions;
   functiondecl* last = 0; // used for error message
@@ -2939,6 +3015,11 @@ symresolution_info::find_functions (const string& name, unsigned arity, const to
       throw SEMANTIC_ERROR(_F("arity mismatch found (function '%s' takes %zu args)",
                               name.c_str(), last->formal_args.size()), tok, last->tok);
     }
+
+  // check every function for safety/security constraints
+  functioncall_security_check fsc(session, call);
+  for (auto gi = functions.begin(); gi != functions.end(); gi++)
+    fsc.traverse(*gi);
 
   return functions;
 }
@@ -6848,6 +6929,14 @@ typeresolution_info::visit_return_statement (return_statement* e)
 
   exp_type& e_type = current_function->type;
   t = current_function->type;
+
+  if (!e->value)
+    {
+      if (e_type != pe_unknown)
+        mismatch (e->tok, pe_unknown, current_function);
+      return;
+    }
+
   e->value->visit (this);
 
   if (e_type != pe_unknown && e->value->type != pe_unknown

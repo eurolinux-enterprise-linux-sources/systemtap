@@ -1,0 +1,117 @@
+From 06351f7f372c670a630e7595fcd77913ed05742d Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Thu, 8 Nov 2018 16:40:40 -0500
+Subject: [PATCH 25/32] PR23860: additional stack protection for strings
+
+Fixes for verifier rejection of some cases requiring string copy,
+since the verifier would reject string copy code extending beyond the
+end of the string even if it was not reachable.
+
+* bpf-opt.cxx (alloc_literal_str): make sure the offset for a short
+  string is at least BPF_MAXSTRINGLEN.
+(zero_stack): New function.
+(program::generate): Use zero_stack() to zero temporary area and
+  prevent verifier complaints.
+* testsuite/systemtap.bpf/asm_tests/pr23860.stp: New testcase.
+---
+ bpf-opt.cxx                                   | 32 ++++++++++++++++++++++++++-
+ testsuite/systemtap.bpf/asm_tests/pr23860.stp | 24 ++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 1 deletion(-)
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/pr23860.stp
+
+diff --git a/bpf-opt.cxx b/bpf-opt.cxx
+index 8b9a6ea60..089dcde55 100644
+--- a/bpf-opt.cxx
++++ b/bpf-opt.cxx
+@@ -36,7 +36,19 @@ alloc_literal_str(program &p, insn_inserter &ins, std::string &str)
+   if (tmp_space + str_bytes > MAX_BPF_STACK)
+     throw std::runtime_error("string allocation failed due to lack of room on stack");
+ 
+-  tmp_space += str_bytes; // TODO: round up for safety?
++  tmp_space += str_bytes;
++
++#if 1
++  // XXX PR23860: Passing a short (non-padded) string constant can fail
++  // the verifier, which is not smart enough to determine that accesses
++  // past the end of the string will never occur. To fix this, make sure
++  // the string offset is at least -BPF_MAXSTRINGLEN.
++  //
++  // Not ideal because an unlucky ordering of allocations may waste space.
++  if (tmp_space < BPF_MAXSTRINGLEN)
++    tmp_space = BPF_MAXSTRINGLEN;
++#endif
++
+   p.use_tmp_space(tmp_space);
+   int ofs = -tmp_space;
+ 
+@@ -932,19 +944,37 @@ post_alloc_cleanup (program &p)
+     }
+ }
+ 
++// XXX PR23860: Passing a short (non-padded) string constant can fail
++// the verifier, which is not smart enough to determine that accesses
++// past the end of the string will never occur. To fix this, start the
++// program with some code to zero out the temporary stack space.
++void
++zero_stack(program &p)
++{
++  block *entry_block = p.blocks[0];
++  insn_before_inserter ins(entry_block, entry_block->first, "zero_stack");
++  value *frame = p.lookup_reg(BPF_REG_10);
++  for (int32_t ofs = -(int32_t)p.max_tmp_space; ofs < 0; ofs += 4)
++    p.mk_st(ins, BPF_W, frame, (int32_t)ofs, p.new_imm(0));
++}
++
+ void
+ program::generate()
+ {
+ #ifdef DEBUG_CODEGEN
+   std::cerr << "DEBUG BEFORE OPT " << *this << std::endl;
+ #endif
++
+   lower_str_values(*this);
++  zero_stack(*this);
++
+   fixup_operands(*this);
+   thread_jumps(*this);
+   fold_jumps(*this);
+   reorder_blocks(*this);
+   reg_alloc(*this);
+   post_alloc_cleanup(*this);
++
+ #ifdef DEBUG_CODEGEN
+   std::cerr << "DEBUG AFTER OPT " << *this << std::endl;
+ #endif
+diff --git a/testsuite/systemtap.bpf/asm_tests/pr23860.stp b/testsuite/systemtap.bpf/asm_tests/pr23860.stp
+new file mode 100644
+index 000000000..bd3e05f66
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/pr23860.stp
+@@ -0,0 +1,24 @@
++function foo:string ()
++%{ /* bpf */ /* pure */ /* unprivileged */ /* stable */
++  0xbf, $$, "key", -, -; /* mov $$, "key" */
++%}
++
++function bar:string ()
++{
++  return "kez"
++}
++
++global t
++
++probe begin {
++  t[foo()] = 4
++  t[bar()] = 6
++  printf("U t[key]=%d, t[kez]=%d should be 4,6\n", t["key"], t["kez"])
++}
++
++probe kernel.function("vfs_read") {
++  t[foo()] = 5
++  t[bar()] = 7
++  printf("K t[key]=%d, t[kez]=%d should be 5,7\n", t["key"], t["kez"])
++  exit()
++}
+-- 
+2.14.5
+

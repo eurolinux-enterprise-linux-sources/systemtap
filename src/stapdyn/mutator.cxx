@@ -1,5 +1,5 @@
 // stapdyn mutator functions
-// Copyright (C) 2012-2014 Red Hat Inc.
+// Copyright (C) 2012-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -637,10 +637,15 @@ mutator::run ()
   if (target_mutatee && target_mutatee->is_terminated())
     p_target_error = !target_mutatee->check_exit();
 
+  // Apply a timeout to the following; dyninst or other bugs can
+  // sometimes hang during this stage (PR23572).
+  alarm(30);
   // Detach from everything
   target_mutatee.reset();
   mutatees.clear();
-
+  // Stand down.
+  alarm(0);
+  
   // Shutdown the stap module.
   return run_module_exit();
 }

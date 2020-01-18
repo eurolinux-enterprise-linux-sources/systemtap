@@ -1,5 +1,5 @@
 // logging tapset
-// Copyright (C) 2005-2015 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -19,10 +19,16 @@
  * as efficient as printf and should be used only for urgent
  * messages. 
  */
-function log (msg:string) %{ /* unprivileged */ /* unmodified-fnargs */
+function log (msg:string)
+%( runtime != "bpf" %?
+   %{ /* unprivileged */ /* unmodified-fnargs */
 	STAP_PRINTF ("%s\n", STAP_ARG_msg);
-%}
-
+   %}
+%:
+   { /* unprivileged */ /* bpf */
+     printf("%s\n", msg)
+   }
+%)
 
 /**
  * sfunction warn - Send a line to the warning stream
@@ -33,9 +39,17 @@ function log (msg:string) %{ /* unprivileged */ /* unmodified-fnargs */
  * staprun. It is also sent over the bulk transport (relayfs) if it is
  * being used. If the last characater is not a newline, the one is added.
  */
-function warn (msg:string) %{ /* unprivileged */ /* unmodified-fnargs */
-    _stp_warn ("%s", STAP_ARG_msg);
-%}
+function warn (msg:string)
+%( runtime != "bpf" %?
+   %{ /* unprivileged */ /* unmodified-fnargs */
+        _stp_warn ("%s", STAP_ARG_msg);
+   %}
+%:
+   { /* unprivileged */ /* bpf */
+     // TODO: _stp_warn intelligently determines whether msg has a newline
+     printf("WARNING: %s\n", msg)
+   }
+%)
 
 
 /**
@@ -60,6 +74,34 @@ function exit ()
 %)
 
 
+%(systemtap_v >= "4.0" %?
+/**
+ * sfunction abort - Immediately shutting down probing script.
+ *
+ * Description: This is similar to exit() but immediately aborts
+ * the current probe handler instead of waiting for its
+ * completion. Probe handlers already running on *other* CPU cores,
+ * however, will still continue to their completion. Unlike error(),
+ * this function call cannot be caught by 'try ... catch'.
+ */
+function abort ()
+%( runtime != "bpf" %?
+  %{ /* unprivileged */
+     atomic_set (session_state(), STAP_SESSION_STOPPING);
+     _stp_exit ();
+     CONTEXT->aborted = 1;
+     CONTEXT->last_stmt = NULL;
+  %}
+%:
+  { /* unprivileged */ /* bpf */
+    _set_exit_status()
+    printf("ERROR: abort() not supported yet\n")
+    exit()  /* TODO: need to abort the execution flow immediately */
+  }
+%)
+%)
+
+
 /**
  * sfunction error - Send an error message
  *
@@ -80,9 +122,10 @@ function error (msg:string)
      CONTEXT->last_stmt = NULL;
   %}
 %:
-   { /* bpf */ /* unprivileged */
-     printf("ERROR\n")
-     exit()
+   { /* unprivileged */ /* bpf */
+     // TODO: should communicate an 'error' exit status
+     printf("ERROR: %s\n", msg)
+     exit() // TODO: should support MAXERRORS, probe error {}
    }
 %)
 
@@ -96,7 +139,7 @@ function error (msg:string)
  * and may be caught by try{} catch{}. A default message will be
  * displayed.
  */
-function assert(expression:long) {
+function assert(expression:long) { /* bpf */ /* unprivileged */
     if (!expression) {
         error("Assertion failed")
     }
@@ -113,7 +156,7 @@ function assert(expression:long) {
  * and may be caught by try{} catch{}. The specified message will be
  * displayed.
  */
-function assert(expression:long, msg:string) {
+function assert(expression:long, msg:string) { /* bpf */ /* unprivileged */
     if (!expression) {
         error(msg)
     }

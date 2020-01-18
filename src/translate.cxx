@@ -1,5 +1,5 @@
 // translation pass
-// Copyright (C) 2005-2017 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2005-2008 Intel Corporation.
 // Copyright (C) 2010 Novell Corporation.
 //
@@ -1959,11 +1959,12 @@ c_unparser::emit_module_init ()
   // intended to help debug problems with systemtap modules.
   if (! session->runtime_usermode_p())
     o->newline() << "_stp_print_kernel_info("
-		 << "\"" << VERSION
-		 << "/" << dwfl_version (NULL) << "\""
-		 << ", (num_online_cpus() * sizeof(struct context))"
-		 << ", " << session->probes.size()
-		 << ");";
+                 << "\"" << escaped_literal_string(session->script_basename()) << "\""
+                 << ", \"" << VERSION
+                 << "/" << dwfl_version (NULL) << "\""
+                 << ", (num_online_cpus() * sizeof(struct context))"
+                 << ", " << session->probes.size()
+                 << ");";
   // In dyninst mode, we need to know when all the globals have been
   // allocated and we're ready to run probe registration.
   else
@@ -4404,11 +4405,18 @@ c_unparser::visit_return_statement (return_statement* s)
   if (current_function == 0)
     throw SEMANTIC_ERROR (_("cannot 'return' from probe"), s->tok);
 
-  if (s->value->type != current_function->type)
+  if (s->value)
+    {
+      if (s->value->type != current_function->type)
+        throw SEMANTIC_ERROR (_("return type mismatch"), current_function->tok,
+                              s->tok);
+
+      c_assign ("l->__retvalue", s->value, "return value");
+    }
+  else if (current_function->type != pe_unknown)
     throw SEMANTIC_ERROR (_("return type mismatch"), current_function->tok,
                           s->tok);
 
-  c_assign ("l->__retvalue", s->value, "return value");
   record_actions(1, s->tok, true);
   o->newline() << "goto out;";
 }
@@ -5731,7 +5739,7 @@ c_unparser::visit_functioncall (functioncall* e)
 
       // call function
       o->newline() << c_funcname (r->name) << " (c);";
-      o->newline() << "if (unlikely(c->last_error)) goto out;";
+      o->newline() << "if (unlikely(c->last_error || c->aborted)) goto out;";
 
       if (!already_checked_action_count && !session->suppress_time_limits
           && !session->unoptimized)
@@ -6068,7 +6076,7 @@ c_unparser::visit_print_format (print_format* e)
 	}
       o->line() << ");";
       o->newline(-1) << "#endif // STP_LEGACY_PRINT";
-      o->newline() << "if (unlikely(c->last_error)) goto out;";
+      o->newline() << "if (unlikely(c->last_error || c->aborted)) goto out;";
       o->newline() << res.value() << ";";
     }
 }

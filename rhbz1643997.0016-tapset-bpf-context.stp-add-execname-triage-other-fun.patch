@@ -1,0 +1,175 @@
+From deb88d0b1fef10177ab197b066f434c720253f8d Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 30 Oct 2018 17:29:46 -0400
+Subject: [PATCH 16/32] tapset/bpf/context.stp :: add execname(), triage other
+ functions
+
+* tapset/bpf/context.stp: Notes on other functions that could be added.
+(execname): New tapset function.
+
+* tapset/linux/context.stp: Move pexecname() to a more logical location.
+---
+ tapset/bpf/context.stp   | 66 ++++++++++++++++++++++++++++++++++++++++++++++++
+ tapset/linux/context.stp | 30 +++++++++++-----------
+ 2 files changed, 81 insertions(+), 15 deletions(-)
+
+diff --git a/tapset/bpf/context.stp b/tapset/bpf/context.stp
+index 45dcd4d71..55e0f871b 100644
+--- a/tapset/bpf/context.stp
++++ b/tapset/bpf/context.stp
+@@ -6,6 +6,34 @@
+ // Public License (GPL); either version 2, or (at your option) any
+ // later version.
+ 
++/**
++ * sfunction execname - Returns the execname of a target process (or group of processes)
++ *
++ * Description: Returns the execname of a target process (or group of processes).
++ */
++function execname:string ()
++%{ /* bpf */ /* pure */ /* unprivileged */ /* stable */
++  /* buf = bpf_stk_alloc(BPF_MAXSTRINGLEN);
++     buf[0] = 0x0; // guarantee NUL byte
++     rc = get_current_comm(buf, BPF_MAXSTRINGLEN); */
++  alloc, $buf, BPF_MAXSTRINGLEN;
++  0x62, $buf, -, -, 0x0; /* stw [$buf+0], 0x0 -- guarantee NUL byte */
++  call, $rc, get_current_comm, $buf, BPF_MAXSTRINGLEN;
++
++  /* if (rc < 0) return err_msg;
++     return buf; */
++  0xa5, $rc, 0, _err, -; /* jlt $rc, 0, _err */
++  0xbf, $$, $buf, -, -; /* mov $$, $buf */
++  0x05, -, -, _done, -; /* ja _done */
++
++  label, _err;
++  0xbf, $$, "<unknown>", -, -; /* mov $$, <unknown> */
++
++  label, _done;
++%}
++
++// TODO: pexecname ()
++
+ /**
+  * sfunction pid - Returns the ID of a thread group
+  * 
+@@ -20,6 +48,8 @@ function pid:long ()
+    0x77, $$, 0, 0, 32   /* rshk $$, 32 */
+ %}
+ 
++// TODO: ns_pid:long ()
++
+ /**
+  * sfunction tid - Returns the thread ID of a target process
+  * 
+@@ -33,6 +63,14 @@ function tid:long ()
+    0xbc, $$, 0, 0, 0    /* movwx $$, r0 */
+ %}
+ 
++// TODO: ns_tid:long ()
++// TODO: ppid:long ()
++// TODO: ns_ppid:long ()
++// TODO: pgrp:long ()
++// TODO: ns_pgrp:long ()
++// TODO: sid:long ()
++// TODO: ns_sid:long ()
++
+ /**
+  * sfunction gid - Returns the group ID of a target process
+  * 
+@@ -46,6 +84,10 @@ function gid:long ()
+    0x77, $$, 0, 0, 32	/* rshk $$, 32 */
+ %}
+ 
++// TODO: ns_gid:long ()
++// TODO: egid:long ()
++// TODO: ns_egid:long ()
++
+ /**
+  * sfunction uid - Returns the user ID of a target process
+  *
+@@ -58,6 +100,12 @@ function uid:long ()
+    0xbc, $$, 0, 0, 0	/* movwx $$, r0 */
+ %}
+ 
++// TODO: ns_uid:long ()
++// TODO: euid:long ()
++// TODO: ns_euid:long ()
++// XXX: is_myproc () is only relevant for unprivileged use of eBPF (still theoretical).
++
++// TODO: Old systemtap-compat scripts should not be running on eBPF backend in the first place?
+ /**
+  * sfunction cpuid - Returns the current cpu number
+  * 
+@@ -82,3 +130,21 @@ function cpu:long ()
+    0x85, 0, 0, 0, 8;	/* call BPF_FUNC_get_smp_processor_id */
+    0xbf, $$, 0, 0, 0	/* movx $$, r0 */
+ %}
++
++// TODO: registers_valid:long ()
++// TODO: user_mode:long ()
++// TODO: is_return:long ()
++// TODO: target:long ()
++// TODO: module_name:string ()
++// XXX: module_size:string () -- not clear if this should refer to the entire .bo or to just the current eBPF routine.
++// TODO: stp_pid:long ()
++// XXX: remote_id:long (), remote_uri:string() -- pending an evaluation of remote eBPF execution.
++// XXX: stack_size() -- not clear if this should be the eBPF stack size or the kernel stack size.
++// XXX: stack_used(),stack_unused() probably a fairly ill-defined idea with the eBPF stack.
++// TODO: Other context functions for info about things like eBPF maps.
++
++// TODO: addr:long ()
++// TODO: uaddr:long ()
++// XXX: cmdline_args:string(n:long, m:long, delim:string) -- requires string concatenation & loops.
++// TODO: cmdline_arg:string(n:long)
++// XXX: cmdline_string:string() -- requires string concatenation & loops.
+diff --git a/tapset/linux/context.stp b/tapset/linux/context.stp
+index 2bd405186..46b1f6b32 100644
+--- a/tapset/linux/context.stp
++++ b/tapset/linux/context.stp
+@@ -19,6 +19,21 @@ function execname:string ()
+ 	strlcpy (STAP_RETVALUE, current->comm, MAXSTRINGLEN);
+ %}
+ 
++/**
++ * sfunction pexecname - Returns the execname of a target process's parent process
++ *
++ * Description: This function returns the execname of a target
++ * process's parent procces.
++ */
++function pexecname:string ()
++%{ /* pure */ /* unprivileged */ /* stable */
++#if defined(STAPCONF_REAL_PARENT)
++	strlcpy (STAP_RETVALUE, current->real_parent->comm, MAXSTRINGLEN);
++#else
++	strlcpy (STAP_RETVALUE, current->parent->comm, MAXSTRINGLEN);
++#endif
++%}
++
+ /**
+  * sfunction pid - Returns the ID of a target process
+  *
+@@ -153,21 +168,6 @@ function ns_sid:long ()
+   else STAP_RETURN (rc);
+ %}
+ 
+-/**
+- * sfunction pexecname - Returns the execname of a target process's parent process
+- *
+- * Description: This function returns the execname of a target
+- * process's parent procces.
+- */
+-function pexecname:string ()
+-%{ /* pure */ /* unprivileged */ /* stable */
+-#if defined(STAPCONF_REAL_PARENT)
+-	strlcpy (STAP_RETVALUE, current->real_parent->comm, MAXSTRINGLEN);
+-#else
+-	strlcpy (STAP_RETVALUE, current->parent->comm, MAXSTRINGLEN);
+-#endif
+-%}
+-
+ /**
+  * sfunction gid - Returns the group ID of a target process
+  *
+-- 
+2.14.5
+

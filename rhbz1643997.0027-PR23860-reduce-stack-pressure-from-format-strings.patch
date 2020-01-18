@@ -1,0 +1,48 @@
+From 59ec363d7236d92f896135ef8fe85433d6f1995e Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Fri, 9 Nov 2018 16:24:09 -0500
+Subject: [PATCH 27/32] PR23860: reduce stack pressure from format strings
+
+Reduce stack pressure created by the earlier commits by allocating
+format strings in a predictable location in the top half of the stack
+[-BPF_MAXSTRINGLEN*2..0) as long as they fit in there. This works
+since only one format string is active at a time and no ordinary
+strings are being allocated in that region of the stack now.
+
+* bpf-opt.cxx (alloc_literal_str): Store format_str in top half.
+---
+ bpf-opt.cxx | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/bpf-opt.cxx b/bpf-opt.cxx
+index f3aa5c462..5c7acb6b9 100644
+--- a/bpf-opt.cxx
++++ b/bpf-opt.cxx
+@@ -27,6 +27,16 @@ alloc_literal_str(program &p, insn_inserter &ins, value *s)
+   str_bytes += 4 - str_bytes % 4; // write aligned words to avoid garbage data
+ 
+   int ofs; size_t tmp_space;
++  if (s->is_format() && str_bytes <= BPF_MAXSTRINGLEN * 2)
++    {
++      // PR23068 workaround mitigation to reduce stack pressure:
++      //
++      // Store format strings in the top of the stack, since at most
++      // one printf() operation is prepared at a time and other string
++      // values will not be stored in that area now.
++      ofs = -str_bytes;
++      goto write_string;
++    }
+ 
+   // Append the string to existing temporary data.
+   //
+@@ -65,6 +75,7 @@ alloc_literal_str(program &p, insn_inserter &ins, value *s)
+   p.use_tmp_space(tmp_space);
+   ofs = -tmp_space;
+ 
++ write_string:
+   value *frame = p.lookup_reg(BPF_REG_10);
+   value *out = emit_simple_literal_str(p, ins, frame, ofs, str, false /* don't zero pad */);
+   return out;
+-- 
+2.14.5
+

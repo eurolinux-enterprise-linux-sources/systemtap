@@ -13,7 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Copyright (C) 2016 Red Hat, Inc.
+ * Copyright (C) 2016-2018 Red Hat, Inc.
  *
  */
 
@@ -61,10 +61,12 @@ as_str(uintptr_t ptr)
 const std::string
 remove_tag(const char *fstr)
 {
-  while (*(++fstr) != '>');
+  while (*(++fstr) != '>' && *fstr != '\0');
+  if (*fstr == '\0') return ""; // avoid segfault
   ++fstr;
   const char *end = fstr + strlen(fstr);
-  while (*(--end) != '<');
+  while (*(--end) != '<' && end >= fstr);
+  assert(end >= fstr);
   return std::string(fstr, end - fstr);
 }
 
@@ -144,6 +146,23 @@ empty:
 }
 
 uint64_t
+bpf_sprintf(std::vector<std::string> &strings, char *fstr,
+            uint64_t arg1, uint64_t arg2, uint64_t arg3)
+{
+  char s[256]; // TODO: configure maximum length setting e.g. BPF_MAXSPRINTFLEN
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+  snprintf(s, 256, fstr, arg1, arg2, arg3);
+#pragma GCC diagnostic pop
+  std::string str(s, 256);
+  strings.push_back(str);
+
+  // Elements of "strings" should not be mutated to avoid
+  // invalidating c_str() pointers.
+  return reinterpret_cast<uint64_t>(strings.back().c_str());
+}
+
+uint64_t
 bpf_interpret(size_t ninsns, const struct bpf_insn insns[],
               std::vector<int> &map_fds, FILE *output_f)
 {
@@ -151,6 +170,7 @@ bpf_interpret(size_t ninsns, const struct bpf_insn insns[],
   uint64_t regs[MAX_BPF_REG];
   uint64_t lookup_tmp = 0xdeadbeef;
   const struct bpf_insn *i = insns;
+  static std::vector<std::string> strings;
   map_keys keys[map_fds.size()];
 
   regs[BPF_REG_10] = (uintptr_t)stack + sizeof(stack);
@@ -364,6 +384,10 @@ bpf_interpret(size_t ninsns, const struct bpf_insn insns[],
               fflush(output_f);
 #pragma GCC diagnostic pop
 	      break;
+            case bpf::BPF_FUNC_sprintf:
+              dr = bpf_sprintf(strings, as_str(regs[1]),
+                               regs[3], regs[4], regs[5]);
+              break;
             case bpf::BPF_FUNC_map_get_next_key:
               dr = map_get_next_key(regs[1], regs[2], regs[3], regs[4],
                                     regs[5],  map_fds, keys[regs[1]]);

@@ -18,6 +18,12 @@
 	argstr = sprintf("%d, %p", filedes, buf_uaddr)
 %)
 
+@define _SYSCALL_FSTAT_REGARGS
+%(
+	filedes = int_arg(1)
+	buf_uaddr = pointer_arg(2)
+%)
+
 probe syscall.fstat = dw_syscall.fstat !, nd_syscall.fstat ? {}
 probe syscall.fstat.return = dw_syscall.fstat.return !, nd_syscall.fstat.return ? {}
 
@@ -31,6 +37,9 @@ probe dw_syscall.fstat = kernel.function("sys_fstat").call ?,
                       kernel.function("sys_oabi_fstat64").call ?,
 %( arch == "s390" %?
                       kernel.function("compat_sys_s390_fstat64").call ?,
+%)
+%( arch == "x86_64" %?
+                      kernel.function("compat_sys_x86_fstat64").call ?,
 %)
                       kernel.function("compat_sys_newfstat").call ?
 {
@@ -47,31 +56,79 @@ probe dw_syscall.fstat.return = kernel.function("sys_fstat").return ?,
 %( arch == "s390" %?
 	kernel.function("compat_sys_s390_fstat64").return ?,
 %)
+%( arch == "x86_64" %?
+	kernel.function("compat_sys_x86_fstat64").return ?,
+%)
 	kernel.function("compat_sys_newfstat").return ?
 {
 	@_SYSCALL_FSTAT_NAME
-	retstr = return_str(1, $return)
+	@SYSC_RETVALSTR($return)
 }
 
 # nd_fstat _____________________________________________________
 
-probe nd_syscall.fstat = kprobe.function("sys_fstat") ?,
-                         kprobe.function("sys_fstat64") ?,
-                         kprobe.function("sys32_fstat64") ?,
-                         kprobe.function("sys_newfstat") ?,
-                         kprobe.function("sys_oabi_fstat64") ?,
+probe nd_syscall.fstat = nd1_syscall.fstat!, nd2_syscall.fstat!, tp_syscall.fstat
+  { }
+
+probe nd1_syscall.fstat = kprobe.function("sys_fstat") ?,
+                          kprobe.function("sys_fstat64") ?,
+                          kprobe.function("sys32_fstat64") ?,
+                          kprobe.function("sys_newfstat") ?,
+                          kprobe.function("sys_oabi_fstat64") ?,
 %( arch == "s390" %?
                          kprobe.function("compat_sys_s390_fstat64") ?,
+%)
+%( arch == "x86_64" %?
+                         kprobe.function("compat_sys_x86_fstat64") ?,
 %)
                          kprobe.function("compat_sys_newfstat") ?
 {
 	@_SYSCALL_FSTAT_NAME
 	asmlinkage()
-	filedes = int_arg(1)
-	buf_uaddr = pointer_arg(2)
+	@_SYSCALL_FSTAT_REGARGS
 	@_SYSCALL_FSTAT_ARGSTR
 }
-probe nd_syscall.fstat.return = kprobe.function("sys_fstat").return ?,
+
+/* kernel 4.17+ */
+probe nd2_syscall.fstat =
+	kprobe.function(@arch_syscall_prefix "sys_fstat") ?,
+	kprobe.function(@arch_syscall_prefix "sys_newfstat") ?,
+	kprobe.function(@arch_syscall_prefix "compat_sys_newfstat") ?,
+	kprobe.function(@arch_syscall_prefix "compat_sys_x86_fstat64") ?
+{
+	__set_syscall_pt_regs(pointer_arg(1))
+	@_SYSCALL_FSTAT_NAME
+	@_SYSCALL_FSTAT_REGARGS
+	@_SYSCALL_FSTAT_ARGSTR
+}
+
+/* kernel 3.5+, but undesirable because it affects all syscalls */
+probe tp_syscall.fstat = __tp_syscall.fstat,
+                         __tp_syscall.fstat64,
+                         __tp_syscall.newfstat
+{
+	__set_syscall_pt_regs($regs)
+	@_SYSCALL_FSTAT_NAME
+	@_SYSCALL_FSTAT_REGARGS
+	@_SYSCALL_FSTAT_ARGSTR
+}
+probe __tp_syscall.fstat = kernel.trace("sys_enter")
+{
+	@__syscall_compat_gate(@const("__NR_oldfstat"), @const("__NR_compat_oldfstat"))
+}
+probe __tp_syscall.fstat64 = kernel.trace("sys_enter")
+{
+	@__syscall_compat_gate(@const("__NR_fstat64"), @const("__NR_compat_fstat64"))
+}
+probe __tp_syscall.newfstat = kernel.trace("sys_enter")
+{
+	@__syscall_compat_gate(@const("__NR_fstat"), @const("__NR_compat_fstat"))
+}
+
+probe nd_syscall.fstat.return = nd1_syscall.fstat.return!, nd2_syscall.fstat.return!, tp_syscall.fstat.return
+  { }
+  
+probe nd1_syscall.fstat.return = kprobe.function("sys_fstat").return ?,
 	kprobe.function("sys_fstat64").return ?,
 	kprobe.function("sys32_fstat64").return ?,
 	kprobe.function("sys_newfstat").return ?,
@@ -79,8 +136,44 @@ probe nd_syscall.fstat.return = kprobe.function("sys_fstat").return ?,
 %( arch == "s390" %?
 	kprobe.function("compat_sys_s390_fstat64").return ?,
 %)
+%( arch == "x86_64" %?
+	kprobe.function("compat_sys_x86_fstat64").return ?,
+%)
 	kprobe.function("compat_sys_newfstat").return ?
 {
 	@_SYSCALL_FSTAT_NAME
-	retstr = returnstr(1)
+	@SYSC_RETVALSTR(returnval())
+}
+
+/* kernel 4.17+ */
+probe nd2_syscall.fstat.return =
+	kprobe.function(@arch_syscall_prefix "sys_fstat").return ?,
+	kprobe.function(@arch_syscall_prefix "sys_newfstat").return ?,
+	kprobe.function(@arch_syscall_prefix "compat_sys_newfstat").return ?,
+	kprobe.function(@arch_syscall_prefix "compat_sys_x86_fstat64").return ?
+{
+	@_SYSCALL_FSTAT_NAME
+	@SYSC_RETVALSTR(returnval())
+}
+ 
+/* kernel 3.5+, but undesirable because it affects all syscalls */
+probe tp_syscall.fstat.return = __tp_syscall.fstat.return,
+                                __tp_syscall.fstat64.return,
+                                __tp_syscall.newfstat.return
+{
+	__set_syscall_pt_regs($regs)
+	@_SYSCALL_FSTAT_NAME
+	@SYSC_RETVALSTR($ret)
+}
+probe __tp_syscall.fstat.return = kernel.trace("sys_exit")
+{
+	@__syscall_compat_gate(@const("__NR_oldfstat"), @const("__NR_compat_oldfstat"))
+}
+probe __tp_syscall.fstat64.return = kernel.trace("sys_exit")
+{
+	@__syscall_compat_gate(@const("__NR_fstat64"), @const("__NR_compat_fstat64"))
+}
+probe __tp_syscall.newfstat.return = kernel.trace("sys_exit")
+{
+	@__syscall_compat_gate(@const("__NR_fstat"), @const("__NR_compat_fstat"))
 }

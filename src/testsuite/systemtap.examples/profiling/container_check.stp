@@ -1,5 +1,5 @@
 #! /usr/bin/env stap
-# Copyright (C) 2016 Red Hat, Inc.
+# Copyright (C) 2016-2018 Red Hat, Inc.
 # Written by William Cohen <wcohen@redhat.com>
 #
 #   container_check.stp watches for use of
@@ -146,7 +146,7 @@ probe ns_capable !, capable
     cap_use[tid()] |= cap
 }
 
-probe nd_syscall.*.return {
+probe syscall_any.return {
   # note any problem capabilities use during syscall
   cap = cap_use[tid()]
   if (cap && child_of_target(task_current())) {
@@ -161,8 +161,8 @@ probe nd_syscall.*.return {
   }
 
   # note any syscalls returning errors
-  if (returnval() < 0 && child_of_target(task_current())) {
-    syscall_errno[execname(), name, returnval()] <<< 1
+  if (retval < 0 && child_of_target(task_current())) {
+    syscall_errno[execname(), name, retval] <<< 1
   }
 }
 

@@ -1,0 +1,31 @@
+From 49f6a9a448b5df9af354897bc6ee2eb68496b3c2 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Thu, 1 Nov 2018 16:13:07 -0400
+Subject: [PATCH 17/32] PR23849 -- temporarily disable stapbpf script caching
+
+---
+ session.cxx | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/session.cxx b/session.cxx
+index ffad3b2b5..f70a7ccfd 100644
+--- a/session.cxx
++++ b/session.cxx
+@@ -1701,7 +1701,13 @@ systemtap_session::parse_cmdline_runtime (const string& opt_runtime)
+       return false;
+ #else
+       runtime_mode = bpf_runtime;
+-      // use_cache = use_script_cache = false; // XXX: From early BPF development. Delete after making sure the cache doesn't break anything.
++
++      // TODO: From early BPF development. Remove after making sure the
++      // cache doesn't break anything. Currently removal is blocked
++      // by PR22330 (module name encoded in trace_printk() calls,
++      // using up a lot of stack space for the cacheable script
++      // names).
++      use_cache = use_script_cache = false;
+ #endif
+     }
+   else if (opt_runtime == string("dyninst"))
+-- 
+2.14.5
+

@@ -1,7 +1,7 @@
 dnl configure.ac --- autoconf input file for systemtap
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([systemtap], 3.3, systemtap@sourceware.org, systemtap)
+AC_INIT([systemtap], 4.0, systemtap@sourceware.org, systemtap)
 dnl                  ^^^ see also NEWS, systemtap.spec, testsuite/configure.ac
 dnl                      doc/SystemTap_Beginners_Guide/en-US/Book_Info.xml
 
@@ -80,6 +80,11 @@ AM_PATH_PYTHON([2.6], [], [:])
 python_basename=$(basename "$PYTHON")
 AC_DEFINE_UNQUOTED([PYTHON_BASENAME], "${python_basename}",
 		   [Base name of the python2 interpreter binary.])
+if test -n "$PYTHON"; then
+AC_DEFINE([PYTHON_EXISTS], [],
+	  [The python2 interpreter binary exists.])
+fi
+
 # AM_PATH_PYTHON defines 'pyexecdir'. Make sure the python and
 # pyexecdir variables get sent down to the subconfigure in the
 # testsuite directory.
@@ -99,6 +104,8 @@ AC_DEFINE_UNQUOTED([PYTHON3_BASENAME], "${python3_basename}",
 # If we found python version 3, set up the other variables for python
 # version 3 that AM_PATH_PYTHON sets up for python version 2.
 if test -n "$PYTHON3"; then
+   AC_DEFINE([PYTHON3_EXISTS], [],
+	     [The python3 interpreter binary exists.])
    AC_CACHE_CHECK([for python3 version], [ac_cv_python3_version],
    		  [ac_cv_python3_version=`$PYTHON3 -c "import sys; sys.stdout.write(sys.version[[:3]])"`])
    AC_SUBST([PYTHON3_VERSION], [$ac_cv_python3_version])
@@ -191,12 +198,12 @@ AC_ARG_ENABLE([ssp],
 AS_IF([test "x$enable_ssp" != xno],[
    save_CFLAGS="$CFLAGS"
    save_CXXFLAGS="$CXXFLAGS"
-   CXXFLAGS="$CXXFLAGS -Werror -fstack-protector-all -D_FORTIFY_SOURCE=2"
-   CFLAGS="$CFLAGS -Werror -fstack-protector-all -D_FORTIFY_SOURCE=2"
+   CXXFLAGS="-Werror -fstack-protector-all -D_FORTIFY_SOURCE=2 $CXXFLAGS"
+   CFLAGS="-Werror -fstack-protector-all -D_FORTIFY_SOURCE=2 $CFLAGS"
    AC_COMPILE_IFELSE([AC_LANG_SOURCE([int something ();])], [
        AC_MSG_NOTICE([Compiling with gcc -fstack-protector-all et al.])
-	CFLAGS="$save_CFLAGS -fstack-protector-all -D_FORTIFY_SOURCE=2"
-	CXXFLAGS="$save_CXXFLAGS -fstack-protector-all -D_FORTIFY_SOURCE=2"],[
+	CFLAGS="-fstack-protector-all -D_FORTIFY_SOURCE=2 $save_CFLAGS"
+	CXXFLAGS="-fstack-protector-all -D_FORTIFY_SOURCE=2 $save_CXXFLAGS"],[
        AC_MSG_NOTICE([Compiler does not support -fstack-protector-all et al.])
        CFLAGS="$save_CFLAGS"
        CXXFLAGS="$save_CXXFLAGS"])])
@@ -417,6 +424,20 @@ AS_IF([test "x$with_nss" != "xno"], [
 ], [have_nss=no])
 
 AM_CONDITIONAL([HAVE_NSS], [test "${have_nss}" = "yes"])
+
+dnl See if we have the openssl headers and libraries
+AC_ARG_WITH([openssl],
+  AS_HELP_STRING([--without-openssl],
+    [Do not use OPENSSL even if present]))
+
+AS_IF([test "x$with_openssl" != "xno"], [
+  PKG_CHECK_MODULES([openssl], [openssl],
+    [have_openssl=yes
+     AC_DEFINE([HAVE_OPENSSL], [1], [Define to 1 if you have the openssl libraries.])
+    ], [have_openssl=no])
+], [have_openssl=no])
+
+AM_CONDITIONAL([HAVE_OPENSSL], [test "${have_openssl}" = "yes"])
 
 dnl Handle dracut directory configuration.  Note we hard-code /usr by default,
 dnl instead of $prefix, because dracut is a system service that doesn't listen
@@ -789,14 +810,20 @@ if test $stap_cv_sectionq = yes; then
   support_section_question=1
 fi
 
-dnl Check if we have <linux/bpf.h> for bpf backend.
-AC_DEFINE([HAVE_BPF_DECLS], [0], [Define to 1 if you have the necessary declarations in bpf.h])
-AC_CHECK_DECLS([BPF_PROG_TYPE_PERF_EVENT],
-               [AC_DEFINE([HAVE_BPF_DECLS], [1])],
+
+AC_ARG_WITH([bpf],
+  AS_HELP_STRING([--without-bpf],[Do not try to build BPF components]))
+
+dnl Allow --without-bpf to disable this autodetection, as some kernels
+dnl have some headers but missing some decls like __NR_bpf.  Too hard
+dnl to detect all the prereqs here.
+AS_IF([test "x$with_bpf" != "xno"], [
+    AC_CHECK_DECLS([BPF_PROG_TYPE_PERF_EVENT],
+               [AC_DEFINE([HAVE_BPF_DECLS], [1], [Define to 1 if you have the necessary declarations in bpf.h])],
                [],
                [#include <linux/bpf.h>])
+    ])
 AM_CONDITIONAL(HAVE_BPF_DECLS, [test "x$ac_cv_have_decl_BPF_PROG_TYPE_PERF_EVENT" == "xyes"])
-
 AC_CONFIG_FILES([includes/sys/sdt-config.h po/Makefile.in])
 
 if test $build_elfutils = yes -a $enable_translator = yes; then
@@ -938,7 +965,7 @@ AS_IF([test "x$enable_http" = "xyes"],
    dnl If we have all of the libraries, the json-c and nss libraries,
    dnl and full C++11 support, we could build the httpd web
    dnl compilation service.
-   AS_IF([test "x$have_libmicrohttpd" == "xtrue" -a "x$have_libuuid" == "xtrue" -a "x$have_libcurl" == "xtrue" -a "x$have_jsonc" == "xyes" -a "x$have_nss" == "xyes" -a "x$have_cxx0x" == "xno"], [have_http_support=yes])])
+   AS_IF([test "x$have_libmicrohttpd" == "xtrue" -a "x$have_libuuid" == "xtrue" -a "x$have_libcurl" == "xtrue" -a "x$have_jsonc" == "xyes" -a "x$have_nss" == "xyes" -a "x$have_openssl" == "xyes" -a "x$have_cxx0x" == "xno"], [have_http_support=yes])])
 
 AS_IF([test "x$have_http_support" = "xyes"],
   [AC_DEFINE([HAVE_HTTP_SUPPORT], [1],
@@ -969,9 +996,13 @@ AC_DEFINE_UNQUOTED(STAP_PREFIX, "$stap_prefix", [configure prefix location])
 AC_SUBST(STAP_PREFIX, "$stap_prefix")
 
 AC_CONFIG_HEADERS([config.h:config.in])
+
+dnl XXX: we'd like fully expanded path names for the @macros@ in there,
+dnl not like exec_prefix=${prefix}
+
 AC_CONFIG_FILES([Makefile doc/Makefile man/Makefile man/cs/Makefile \
 doc/beginners/Makefile doc/SystemTap_Tapset_Reference/Makefile \
-man/stap.1 man/stappaths.7 man/systemtap.8 \
+man/stap.1 man/stappaths.7 man/systemtap-service.8 \
 man/cs/stap.1 man/cs/stappaths.7 man/cs/systemtap.8 \
 initscript/config.systemtap initscript/config.stap-server \
 initscript/systemtap initscript/stap-server \
@@ -994,6 +1025,7 @@ AC_CONFIG_FILES([staprun/run-staprun], [chmod +x staprun/run-staprun])
 AC_CONFIG_FILES([staprun/guest/stapshd], [chmod +x staprun/guest/stapshd])
 AC_CONFIG_FILES([staprun/guest/stapsh-daemon], [chmod +x staprun/guest/stapsh-daemon])
 AC_CONFIG_FILES([staprun/guest/stapsh@.service])
+AC_CONFIG_FILES(stap-exporter/Makefile)
 
 dnl AC_CONFIG_FILES([macros.systemtap])
 dnl ^^^ not that one, because we want to expand $vars etc. to fqdn's,

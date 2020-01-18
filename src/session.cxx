@@ -101,6 +101,7 @@ systemtap_session::systemtap_session ():
   suppressed_errors(0),
   warningerr_count(0),
   target_namespaces_pid(0),
+  suppress_costly_diagnostics(0),
   last_token (0)
 {
   struct utsname buf;
@@ -176,6 +177,7 @@ systemtap_session::systemtap_session ():
   update_release_sysroot = false;
   suppress_time_limits = false;
   target_namespaces_pid = 0;
+  suppress_costly_diagnostics = 0;
   color_mode = color_auto;
   color_errors = isatty(STDERR_FILENO) // conditions for coloring when
     && strcmp(getenv("TERM") ?: "notdumb", "dumb"); // on auto
@@ -294,6 +296,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   suppressed_errors(0),
   warningerr_count(0),
   target_namespaces_pid(0),
+  suppress_costly_diagnostics(0),
   last_token (0)
 {
   release = kernel_release = kern;
@@ -486,7 +489,7 @@ systemtap_session::version ()
              "Copyright (C) 2005-2018 Red Hat, Inc. and others\n"   // PRERELEASE
              "This is free software; see the source for copying conditions.\n",
              version_string().c_str());
-  cout << _F("tested kernel versions: %s ... %s\n", "2.6.18", "4.18-rc0");   // PRERELEASE
+  cout << _F("tested kernel versions: %s ... %s\n", "2.6.18", "4.19-rc7");   // PRERELEASE
   
   cout << _("enabled features:")
 #ifdef HAVE_AVAHI
@@ -2287,6 +2290,25 @@ systemtap_session::register_library_aliases()
     }
 }
 
+// The name of the primary stap file, if any -- usually user_files[0]->name:
+string
+systemtap_session::script_name()
+{
+  if (user_files.empty())
+    return "<unknown>";
+  return user_files[0]->name;
+}
+
+
+// The basename of the primary stap file, if any:
+string
+systemtap_session::script_basename()
+{
+  if (user_files.empty())
+    return "<unknown>";
+  return user_files[0]->name.substr(user_files[0]->name.rfind('/')+1); // basename
+}
+
 
 // Print this given token, but abbreviate it if the last one had the
 // same file name.
@@ -2729,6 +2751,10 @@ systemtap_session::parse_stap_color(const std::string& type)
  *
  * On certain kernels (RHEL7), we also have to check
  * /sys/kernel/security/securelevel.
+ *
+ * On certain kernels (Fedora28+), efi-lockdown may be in effect, but
+ * we lack a way of telling.  RHBZ1638874.  So check an environment
+ * variable "SYSTEMTAP_SIGN" instead for now.
  */
 bool
 systemtap_session::modules_must_be_signed()
@@ -2737,6 +2763,9 @@ systemtap_session::modules_must_be_signed()
   ifstream securelevel("/sys/kernel/security/securelevel");
   char status = 'N';
 
+  if (getenv("SYSTEMTAP_SIGN"))
+    return true;
+
   statm >> status;
   if (status == 'Y')
     return true;
@@ -2744,6 +2773,7 @@ systemtap_session::modules_must_be_signed()
   securelevel >> status;
   if (status == '1')
     return true;
+
   return false;
 }
 

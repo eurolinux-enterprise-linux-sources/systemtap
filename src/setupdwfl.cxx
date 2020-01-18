@@ -1,5 +1,5 @@
 // Setup routines for creating fully populated DWFLs. Used in pass 2 and 3.
-// Copyright (C) 2009-2014 Red Hat, Inc.
+// Copyright (C) 2009-2018 Red Hat, Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -740,7 +740,7 @@ get_kernel_build_id(systemtap_session &s)
 
   // Try to find BuildID from vmlinux.id
   string kernel_buildID_path = s.kernel_build_tree + "/vmlinux.id";
-  if(s.verbose > 1)
+  if(s.verbose > 2)
     clog << _F("Attempting to extract kernel debuginfo build ID from %s", kernel_buildID_path.c_str()) << endl;
   ifstream buildIDfile;
   buildIDfile.open(kernel_buildID_path.c_str());

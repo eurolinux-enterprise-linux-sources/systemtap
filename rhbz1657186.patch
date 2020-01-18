@@ -1,0 +1,64 @@
+commit 8bc64034509474bee3fb7996b2a9e74c8bc27281
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Fri Oct 19 17:36:04 2018 -0400
+
+    nfsd tapset: adapt nfsd.proc4.read probe to different kernel versions
+    
+    Here too an if(@defined($u)) is appropriate, just like in the .write case.
+
+diff --git a/tapset/linux/nfsd.stp b/tapset/linux/nfsd.stp
+index 2fe9b0f..674e3e3 100644
+--- a/tapset/linux/nfsd.stp
++++ b/tapset/linux/nfsd.stp
+@@ -567,10 +567,17 @@ probe nfsd.proc4.read = kernel.function("nfsd4_read").call !,
+ 	version = 4
+ 	fh = & @nfsd4_compound_state($cstate)->current_fh
+ 
+-	count = $read->rd_length
+-	offset = $read->rd_offset
+-	vec = $rqstp->rq_vec
+-	vlen = $read->rd_vlen
++        if (@defined($u)) {
++             count = $u->read->rd_length
++             offset = $u->read->rd_offset
++             vec = $rqstp->rq_vec
++             vlen = $u->read->rd_vlen
++        } else {
++             count = $read->rd_length
++             offset = $read->rd_offset
++             vec = $rqstp->rq_vec
++             vlen = $read->rd_vlen
++        }
+ 
+ 	uid = __rqstp_uid($rqstp)
+ 	gid = __rqstp_gid($rqstp)
+
+commit 4e81610ae8c233d876f378cca8374e34cc2ee0e8
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Fri Oct 19 19:31:31 2018 -0400
+
+    nfsd tapset: adapt nfsd.proc4.commit probe to different kernel versions
+    
+    Here too an if(@defined($u)) is appropriate, just like in
+    every other case.  Audited remainder.
+
+diff --git a/tapset/linux/nfsd.stp b/tapset/linux/nfsd.stp
+index 674e3e3..aa04f24 100644
+--- a/tapset/linux/nfsd.stp
++++ b/tapset/linux/nfsd.stp
+@@ -852,8 +852,13 @@ probe nfsd.proc4.commit = kernel.function("nfsd4_commit").call !,
+ 	proto = $rqstp->rq_prot
+ 	version = 4
+ 	fh = & @nfsd4_compound_state($cstate)->current_fh
+-	count = $commit->co_count 
+-	offset = $commit->co_offset 
++        if (@defined($u)) {
++	    count = $u->commit->co_count 
++	    offset = $u->commit->co_offset
++        } else {
++   	    count = $commit->co_count 
++	    offset = $commit->co_offset
++        }
+ 
+ 	uid = __rqstp_uid($rqstp)
+ 	gid = __rqstp_gid($rqstp)

@@ -1,5 +1,5 @@
 // systemtap compile-server utils header
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -25,5 +25,8 @@ execute_and_capture(int verbose,
 
 int
 get_file_hash(const std::string &pathname, std::string &result);
+
+bool
+make_temp_dir(std::string &path);
 
 #endif /* __UTILS_H__ */

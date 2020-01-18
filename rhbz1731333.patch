@@ -1,0 +1,48 @@
+commit 0c68adcd91cc40e825cfa5a7def29de4ac76b1f1
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Thu Aug 29 18:18:59 2019 -0400
+
+    rhbz1731333: nfsd.proc.write, tolerate awol 'vlen'
+    
+    This variable has disappeared from the kernel via commit
+    8154ef2776aa512a3eaa0e7db030dc4803354d61.  Substitute a 0.
+
+diff --git a/tapset/linux/nfsd.stp b/tapset/linux/nfsd.stp
+index aa04f24..5a77f4e 100644
+--- a/tapset/linux/nfsd.stp
++++ b/tapset/linux/nfsd.stp
+@@ -638,14 +638,14 @@ probe nfsd.proc2.write = kernel.function("nfsd_proc_write") !,
+ 		count = @nfsd2_writeargs($rqstp->rq_argp)->len
+ 		offset = @nfsd2_writeargs($rqstp->rq_argp)->offset 
+ 		vec = $rqstp->rq_vec
+-		vlen = @nfsd2_writeargs($rqstp->rq_argp)->vlen
++		vlen = @choose_defined(@nfsd2_writeargs($rqstp->rq_argp)->vlen, 0)
+ 	}
+ 	else {
+ 		fh = & @nfsd2_writeargs($argp)->fh
+ 		count = $argp->len
+ 		offset = $argp->offset 
+ 		vec = @choose_defined($rqstp->rq_vec, $argp->vec)
+-		vlen = $argp->vlen
++		vlen = @choose_defined($argp->vlen, 0)
+ 	}
+ 
+ 	stable = 1			# hardcoded in nfsd_proc_write()
+@@ -691,7 +691,7 @@ probe nfsd.proc3.write = kernel.function("nfsd3_proc_write") !,
+ 		count = @nfsd3_writeargs($rqstp->rq_argp)->count 
+ 		offset = @nfsd3_writeargs($rqstp->rq_argp)->offset 
+ 		vec = $rqstp->rq_vec
+-		vlen = @nfsd3_writeargs($rqstp->rq_argp)->vlen
++		vlen = @choose_defined(@nfsd3_writeargs($rqstp->rq_argp)->vlen, 0)
+ 		stable = @nfsd3_writeargs($rqstp->rq_argp)->stable
+ 	}
+ 	else {
+@@ -699,7 +699,7 @@ probe nfsd.proc3.write = kernel.function("nfsd3_proc_write") !,
+ 		count = $argp->count 
+ 		offset = $argp->offset 
+ 		vec = @choose_defined($rqstp->rq_vec, $argp->vec)
+-		vlen = $argp->vlen
++		vlen = @choose_defined($argp->vlen, 0)
+ 		stable = $argp->stable
+ 	}
+ 

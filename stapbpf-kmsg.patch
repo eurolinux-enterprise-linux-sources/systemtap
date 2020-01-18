@@ -1,0 +1,49 @@
+commit 82349a5eb0e1122d5532a03367d91d5ee838722d
+Author: Serhei Makarov <smakarov@redhat.com>
+Date:   Fri Mar 1 11:16:32 2019 -0500
+
+    Don't print to /dev/kmsg if it's unavailable
+    
+    * stapbpf/stapbpf.cxx (kmsg): initialize to NULL.
+    (prog_load): only print to kmsg if it's available.
+    (main): warn if kmsg is unavailable.
+
+diff --git a/stapbpf/stapbpf.cxx b/stapbpf/stapbpf.cxx
+index 188724b..ae97d4b 100644
+--- a/stapbpf/stapbpf.cxx
++++ b/stapbpf/stapbpf.cxx
+@@ -73,7 +73,7 @@ static int warnings = 1;
+ static int exit_phase = 0;
+ static int interrupt_message = 0;
+ static FILE *output_f = stdout;
+-static FILE *kmsg;
++static FILE *kmsg = NULL;
+ 
+ static const char *module_name;
+ static const char *module_basename;
+@@ -341,9 +341,12 @@ prog_load(Elf_Data *data, const char *name)
+   if (data->d_size % sizeof(bpf_insn))
+     fatal("program size not a multiple of %zu\n", sizeof(bpf_insn));
+ 
+-  fprintf (kmsg, "%s (%s): stapbpf: %s, name: %s, d_size: %lu\n",
+-           module_basename, script_name, VERSION, name, (unsigned long)data->d_size);
+-  fflush (kmsg); // Otherwise, flush will only happen after the prog runs.
++  if (kmsg != NULL)
++    {
++      fprintf (kmsg, "%s (%s): stapbpf: %s, name: %s, d_size: %lu\n",
++               module_basename, script_name, VERSION, name, (unsigned long)data->d_size);
++      fflush (kmsg); // Otherwise, flush will only happen after the prog runs.
++    }
+   int fd = bpf_prog_load(prog_type, static_cast<bpf_insn *>(data->d_buf),
+ 			 data->d_size, module_license, kernel_version);
+   if (fd < 0)
+@@ -1575,5 +1578,7 @@ main(int argc, char **argv)
+ 
+-  kmsg = fopen("/dev/kmsg", "a");
++  kmsg = fopen("/dev/kmsg", "w");
++  if (kmsg == NULL)
++    fprintf(stderr, "WARNING: could not open /dev/kmsg for diagnostics: %s\n", strerror(errno));
+ 
+   load_bpf_file(argv[optind]);
+   init_internal_globals();
+

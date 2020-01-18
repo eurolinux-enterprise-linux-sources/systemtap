@@ -1,6 +1,6 @@
 #! /usr/bin/env stap
 #
-# Copyright (C) 2010 Red Hat, Inc.
+# Copyright (C) 2010, 2018 Red Hat, Inc.
 # By Dominic Duval, Red Hat Inc.
 # dduval@redhat.com
 #
@@ -11,8 +11,8 @@
 
 global execname, errors
 
-probe syscall.*.return {
-  errno = $return
+probe syscall_any.return {
+  errno = retval
   if ( errno < 0 ) {
     p = pid()
     execname[p]=execname();
@@ -35,3 +35,13 @@ probe end {
   }
 }
 
+global prom_arr
+
+probe prometheus {
+  foreach ([p, errno, name] in errors- limit 20) {
+    prom_arr[p, errno, name] = @count(errors[p, errno, name])
+  }
+
+  @prometheus_dump_array3(prom_arr, "count", "pid", "errno", "name")
+  delete prom_arr
+}

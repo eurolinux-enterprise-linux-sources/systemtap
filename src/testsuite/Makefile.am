@@ -55,7 +55,7 @@ check-local:
 # but installcheck does not follow an implicit check-DEJAGNU, go figure
 installcheck: site.exp
 	-rm -rf artifacts
-	-test -z $(SYSTEMTAP_TESTSUITE_RESUME) && $(MAKE) clean
+	-test -z $(SYSTEMTAP_TESTSUITE_RESUME) && $(MAKE) clean && $(MAKE) site.exp
 	-mv systemtap.log systemtap.temp1.log 2>/dev/null
 	-mv systemtap.sum systemtap.temp1.sum 2>/dev/null
 	-rmmod uprobes 2>/dev/null
@@ -67,7 +67,7 @@ installcheck: site.exp
 	  $(SHELL) $(srcdir)/dg-extract-results.sh -L `find . -name 'systemtap.temp[1,2].log' -print` > systemtap.log; \
 	  rm -f systemtap.temp1.log systemtap.temp1.sum systemtap.temp2.log systemtap.temp2.sum; \
 	fi
-	-tail systemtap.sum
+	-sed -ne '/systemtap.Summary/,$$ p' < systemtap.sum
 	if test `( expr "$(DEJAZILLA)" : '.*://.*' )` -ne 0; then \
 	  curl -F file=@systemtap.sum $(DEJAZILLA); \
 	elif test `( expr "$(DEJAZILLA)" : '.*@.*' )` -ne 0; then \
@@ -79,7 +79,7 @@ installcheck: site.exp
 # files for all the tests, plus separate logs per testcase are kept in the artifacts
 # directory. Serial tests (see below) log to artifacts/__serialtests.
 installcheck-parallel: site.exp
-	-test -z $(SYSTEMTAP_TESTSUITE_RESUME) && $(MAKE) clean
+	-test -z $(SYSTEMTAP_TESTSUITE_RESUME) && $(MAKE) clean && $(MAKE) site.exp
 	-rmmod uprobes 2>/dev/null
 	mkdir -p artifacts/__serialtests
 	MAKEFLAGS= $(RUNTEST2) systemtap.base/environment_sanity.exp
@@ -170,6 +170,7 @@ SYSTEMTAP_TAPSET=$(DESTDIR)$(pkgdatadir)/tapset
 LD_LIBRARY_PATH=$(DESTDIR)$(libdir)/systemtap:$(DESTDIR)$(libdir)/dyninst
 CRASH_LIBDIR=$(DESTDIR)$(libdir)/systemtap
 SYSTEMTAP_PATH=$(DESTDIR)$(bindir)
+SYSTEMTAP_SPATH=$(DESTDIR)$(sbindir)
 SYSTEMTAP_INCLUDES=$(DESTDIR)$(includedir)
 
 # These values get passed down from the main configure.
@@ -181,5 +182,5 @@ SYSCONFDIR=@sysconfdir@
 
 RUNTESTDEFAULTFLAGS = --tool $$tool --tool_opts \'$(TOOL_OPTS)\' --srcdir $(shell readlink -f $(srcdir))
 EXPECT = expect
-RUNTEST= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) $(srcdir)/execrc runtest
-RUNTEST2= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) runtest
+RUNTEST= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$(SYSTEMTAP_SPATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_SPATH=$(SYSTEMTAP_SPATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) $(srcdir)/execrc runtest
+RUNTEST2= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$(SYSTEMTAP_SPATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_SPATH=$(SYSTEMTAP_SPATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) runtest

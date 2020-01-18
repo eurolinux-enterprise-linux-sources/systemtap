@@ -1,5 +1,5 @@
 // -*- C++ -*-
-// Copyright (C) 2005-2016 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -80,9 +80,10 @@ struct compile_server_cache;
 // a vardecl instead of out here at the systemtap_session level.
 struct statistic_decl
 {
-  statistic_decl()
+  statistic_decl(int _stat_ops = 0)
     : type(none),
-      linear_low(0), linear_high(0), linear_step(0), bit_shift(0), stat_ops(0)
+      linear_low(0), linear_high(0), linear_step(0), bit_shift(0),
+      stat_ops(_stat_ops)
   {}
   enum { none, linear, logarithmic } type;
   int64_t linear_low;
@@ -346,6 +347,9 @@ public:
   std::vector<stapfile*> user_files;
   std::vector<stapfile*> library_files;
 
+  std::string script_name(); // usually user_files[0]->name
+  std::string script_basename(); // basename of script_name()
+
   // filters to run over all code before symbol resolution
   //   e.g. @cast expansion
   std::vector<update_visitor*> code_filters;
@@ -439,6 +443,8 @@ public:
   translator_output* op_create_auxiliary(bool trailer_p = false);
 
   int target_namespaces_pid;
+
+  unsigned suppress_costly_diagnostics; /* set during processing of optional probes */
 
   const token* last_token;
   void print_token (std::ostream& o, const token* tok);

@@ -1,0 +1,62 @@
+From ba62b58974fd25f7281fa151411c8e32b3951fbb Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Fri, 2 Nov 2018 12:22:01 -0400
+Subject: [PATCH 18/32] tapset/bpf/task.stp :: rudiment of task tapset
+
+---
+ tapset/bpf/task.stp                         | 20 ++++++++++++++++++++
+ testsuite/systemtap.bpf/bpf_tests/task1.stp | 15 +++++++++++++++
+ 2 files changed, 35 insertions(+)
+ create mode 100644 tapset/bpf/task.stp
+ create mode 100644 testsuite/systemtap.bpf/bpf_tests/task1.stp
+
+diff --git a/tapset/bpf/task.stp b/tapset/bpf/task.stp
+new file mode 100644
+index 000000000..9f558a166
+--- /dev/null
++++ b/tapset/bpf/task.stp
+@@ -0,0 +1,20 @@
++// task information tapset
++// Copyright (C) 2018 Red Hat Inc.
++//
++// This file is part of systemtap, and is free software.  You can
++// redistribute it and/or modify it under the terms of the GNU General
++// Public License (GPL); either version 2, or (at your option) any
++// later version.
++
++@__private30 function _task_cur:long()
++%{ /* bpf */ /* pure */
++  call, $$, get_current_task;
++%}
++
++/**
++ * sfunction task_current - The current task_struct of the current task
++ */
++function task_current:long () {
++  // TODO: return & @task(_task_cur())
++  return & @cast(_task_cur(), "task_struct")
++}
+diff --git a/testsuite/systemtap.bpf/bpf_tests/task1.stp b/testsuite/systemtap.bpf/bpf_tests/task1.stp
+new file mode 100644
+index 000000000..b0faab361
+--- /dev/null
++++ b/testsuite/systemtap.bpf/bpf_tests/task1.stp
+@@ -0,0 +1,15 @@
++probe begin {
++	printf("BEGIN\n")
++}
++
++probe kernel.function("vfs_read") {
++	// TODO: PR23816, task.stp tapset
++	printf("vfs_read by %s", execname())
++	printf("/%s", kernel_string(@cast(task_current(), "task_struct")->comm))
++	printf(" PID %d/%d\n", pid(), @cast(task_current(), "task_struct")->tgid)
++	exit()
++}
++
++probe end {
++	printf("END PASS\n")
++}
+-- 
+2.14.5
+

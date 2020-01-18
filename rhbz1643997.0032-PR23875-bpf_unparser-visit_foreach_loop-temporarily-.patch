@@ -1,0 +1,28 @@
+From 6fd1813950d708c5b94ed155213a7b9c84b7fbfc Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 13 Nov 2018 13:13:14 -0500
+Subject: [PATCH 32/32] PR23875 bpf_unparser::visit_foreach_loop(): temporarily
+ disable string key iteration
+
+---
+ bpf-translate.cxx | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/bpf-translate.cxx b/bpf-translate.cxx
+index 20cd47032..0f35e0d3f 100644
+--- a/bpf-translate.cxx
++++ b/bpf-translate.cxx
+@@ -1532,6 +1532,10 @@ bpf_unparser::visit_foreach_loop(foreach_loop* s)
+     throw SEMANTIC_ERROR(_("unknown type"), s->base->tok);
+   vardecl *arraydecl = a->referent;
+ 
++  // TODO PR23875: foreach should handle string keys
++  if (arraydecl->index_types[0] != pe_long)
++    throw SEMANTIC_ERROR(_("unhandled string index type"), s->tok);
++
+   auto g = glob.globals.find(arraydecl);
+   if (g == glob.globals.end())
+     throw SEMANTIC_ERROR(_("unknown array"), arraydecl->tok);
+-- 
+2.14.5
+

@@ -1,0 +1,91 @@
+From 16e9cfa909a183d8e61142d80575189408a2a244 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Wed, 24 Oct 2018 15:56:44 -0400
+Subject: [PATCH 01/32] testsuite/systemtap.bpf :: diagnose a bug in
+ print_format("%s%s", ...)
+
+---
+ testsuite/systemtap.bpf/asm_tests/string-basic.stp | 19 ++++++++++
+ testsuite/systemtap.bpf/bpf_tests/string3.stp      | 44 ++++++++++++++++++++++
+ 2 files changed, 63 insertions(+)
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/string-basic.stp
+ create mode 100644 testsuite/systemtap.bpf/bpf_tests/string3.stp
+
+diff --git a/testsuite/systemtap.bpf/asm_tests/string-basic.stp b/testsuite/systemtap.bpf/asm_tests/string-basic.stp
+new file mode 100644
+index 000000000..7377e4399
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/string-basic.stp
+@@ -0,0 +1,19 @@
++/* narrowing down a bug that turned out unrelated to assembly */
++function foo:string() %{ /* bpf */ /* pure */
++  0xbf, $$, "test", -, -;
++%}
++
++probe begin {
++  printf("U %s %s\n", foo(), "test"/*bar (5)*/)
++}
++
++probe kernel.function("vfs_read") {
++  printf("K 1 %s\n", foo()) // <- this worked
++  printf("K 2 %s\n", "test") // <- this worked
++  printf("K 3 %s %s\n", foo(), "test") // <- this didn't
++  printf("K 4 %s %s\n", "test", "test") // <- this didn't
++  printf("K 5 %s %s\n", foo(), foo()) // <- this didn't
++  printf("K 6 %s", "test") printf(" %s\n", "test") // <- this did
++  printf("K %d %s\n", 7, "test") // <- this did
++  exit()
++}
+diff --git a/testsuite/systemtap.bpf/bpf_tests/string3.stp b/testsuite/systemtap.bpf/bpf_tests/string3.stp
+new file mode 100644
+index 000000000..cf6ec071d
+--- /dev/null
++++ b/testsuite/systemtap.bpf/bpf_tests/string3.stp
+@@ -0,0 +1,44 @@
++// stapbpf string manipulation -- store string in global from kernel space
++// XXX: the 'locking' scheme here is kind of dumb but it seems to work
++
++global counter = 0
++global var
++global tab1
++global tab2
++
++@define test_print
++%(
++  /* Test multiple %s in one printf */
++  printf("[")
++  printf("%s%s%s", "str0", var, tab1[17])
++  printf("%s]", tab2["key"])
++%)
++
++probe begin {
++  printf("BEGIN")
++}
++
++probe kernel.function("vfs_read") {
++  if (counter == 0) {
++    var = "str1"
++    tab1[17] = "str2"
++    tab2["key"] = "str3"
++    printf("probe0")
++    @test_print
++    counter = 1
++  }
++}
++
++probe kernel.function("vfs_read") {
++  if (counter == 1) {
++    printf("probe1")
++    @test_print
++    exit()
++  }
++}
++
++probe end {
++  printf("end")
++  @test_print
++  printf("END\n")
++}
+-- 
+2.14.5
+

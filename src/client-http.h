@@ -1,5 +1,5 @@
 // -*- C++ -*-
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -20,6 +20,7 @@ class http_client_backend : public client_backend
 {
 public:
   http_client_backend (systemtap_session &s);
+  ~http_client_backend ();
 
   friend class http_client;
 

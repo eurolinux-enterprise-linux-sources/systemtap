@@ -1,5 +1,5 @@
 // systemtap compile-server utils
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -22,6 +22,7 @@ extern "C" {
 #include <spawn.h>
 #include <sys/mman.h>
 #include "../mdfour.h"
+#include <limits.h>
 }
 
 using namespace std;
@@ -160,4 +161,21 @@ get_file_hash(const string &pathname, string &result)
     rstream << "_" << setw(0) << dec << (unsigned)md4.totalN;
     result = rstream.str();
     return 0;
+}
+
+bool
+make_temp_dir(string &path)
+{
+    // Create the temp directory
+    char tmpdir[PATH_MAX];
+    snprintf(tmpdir, PATH_MAX, "%s/stap-http.XXXXXX",
+	     (getenv("TMPDIR") ?: "/tmp"));
+    const char *tmpdir_name = mkdtemp(tmpdir);
+    if (! tmpdir_name) {
+	server_error(_F("Cannot create temporary directory (\"%s\"): %s", tmpdir, strerror(errno)));
+	path.clear();
+	return false;
+    }
+    path = tmpdir_name;
+    return true;
 }

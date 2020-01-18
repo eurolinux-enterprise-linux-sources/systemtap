@@ -1,5 +1,5 @@
 // Copyright (C) Andrew Tridgell 2002 (original file)
-// Copyright (C) 2006-2014 Red Hat Inc. (systemtap changes)
+// Copyright (C) 2006-2018 Red Hat Inc. (systemtap changes)
 //
 // This program is free software; you can redistribute it and/or
 // modify it under the terms of the GNU General Public License as
@@ -1147,6 +1147,26 @@ string unescape_glob_chars (const string& str)
   return op;
 }
 
+// PR23391, this is still incomplete but enough is
+// complete to handle "__{ia32,x64}_sys_$syscall"
+// functions.
+string csh_to_ksh (const string& csh)
+{
+  string ksh;
+  for (unsigned i=0; i<csh.size(); i++)
+    {
+      if (csh[i] == '{')
+        ksh += "@(";
+      else if (csh[i] == '}')
+        ksh += ')';
+      else if (csh[i] == ',')
+        ksh += '|';
+      else
+        ksh += csh[i];
+    }
+  return ksh;
+}
+
 bool identifier_string_needs_escape (const string& str)
 {
   for (unsigned i = 0; i < str.size (); i++)
@@ -1159,7 +1179,7 @@ bool identifier_string_needs_escape (const string& str)
   return false;
 }
 
-string escaped_indentifier_string (const string &str)
+string escaped_identifier_string (const string &str)
 {
   if (! identifier_string_needs_escape (str))
     return str;
@@ -1178,6 +1198,87 @@ string escaped_indentifier_string (const string &str)
 	op += this_char;
     }
 
+  return op;
+}
+
+unsigned char
+octal_character (unsigned c)
+{
+  return '0' + c % 8;
+}
+
+string
+escaped_character (unsigned c)
+{
+  ostringstream o;
+  int oc = (int)c;
+
+  switch (oc)
+    {
+    case '\'':
+      o << "\\'";
+      break;
+
+    case '"':
+      o << "\\\"";
+      break;
+
+    case '\n':
+      o << "\\n";
+      break;
+
+    case '\t':
+      o << "\\t";
+      break;
+
+    case '\v':
+      o << "\\v";
+      break;
+
+    case '\b':
+      o << "\\b";
+      break;
+
+    case '\r':
+      o << "\\r";
+      break;
+
+    case '\f':
+      o << "\\f";
+      break;
+
+    case '\a':
+      o << "\\a";
+      break;
+
+    case '\\':
+      o << "\\\\";
+      break;
+
+    default:
+
+      if ((oc < 256) && isprint(oc))
+        {
+          o << (unsigned char) oc;
+        }
+      else
+        {
+          o << '\\' << octal_character(oc / 64)
+            << octal_character(oc / 8)
+            << octal_character(oc);
+        }
+    }
+  return o.str();
+}
+
+string
+escaped_literal_string (const string& str)
+{
+  string op;
+  for (unsigned i = 0; i < str.size (); i++)
+    {
+      op += escaped_character((unsigned)str[i]);
+    }
   return op;
 }
 
@@ -1621,9 +1722,10 @@ get_distro_info(vector<string> &info)
 	name = out.str();
 
 	vector<string> cmd2 { "lsb_release", "--short", "--release" };
-	rc = stap_system_read(0, cmd2, out);
+	stringstream out2;
+	rc = stap_system_read(0, cmd2, out2);
 	if (rc == 0) {
-	    version = out.str();
+	    version = out2.str();
 	}
     }
 

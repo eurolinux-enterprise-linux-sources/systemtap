@@ -1,5 +1,5 @@
 // tapset resolution
-// Copyright (C) 2005-2017 Red Hat Inc.
+// Copyright (C) 2005-2018 Red Hat Inc.
 // Copyright (C) 2005-2007 Intel Corporation.
 // Copyright (C) 2008 James.Bottomley@HansenPartnership.com
 //
@@ -181,11 +181,13 @@ common_probe_entryfn_prologue (systemtap_session& s,
   s.op->newline(-1) << "}";
 
   s.op->newline();
+  s.op->newline() << "c->aborted = 0;";
   s.op->newline() << "c->last_stmt = 0;";
   s.op->newline() << "c->last_error = 0;";
   s.op->newline() << "c->nesting = -1;"; // NB: PR10516 packs locals[] tighter
   s.op->newline() << "c->uregs = 0;";
   s.op->newline() << "c->kregs = 0;";
+  s.op->newline() << "c->sregs = 0;";
   s.op->newline() << "#if defined __ia64__";
   s.op->newline() << "c->unwaddr = 0;";
   s.op->newline() << "#endif";
@@ -198,7 +200,7 @@ common_probe_entryfn_prologue (systemtap_session& s,
   s.op->newline() << "c->probe_type = " << probe_type << ";";
   // reset Individual Probe State union
   s.op->newline() << "memset(&c->ips, 0, sizeof(c->ips));";
-  s.op->newline() << "c->user_mode_p = 0; c->full_uregs_p = 0;";
+  s.op->newline() << "c->user_mode_p = 0; c->full_uregs_p = 0; ";
   s.op->newline() << "#ifdef STAP_NEED_REGPARM"; // i386 or x86_64 register.stp
   s.op->newline() << "c->regparm = 0;";
   s.op->newline() << "#endif";
@@ -224,6 +226,11 @@ common_probe_entryfn_prologue (systemtap_session& s,
   s.op->newline() << "#if defined(STP_NEED_UNWIND_DATA)";
   s.op->newline() << "c->uwcache_user.state = uwcache_uninitialized;";
   s.op->newline() << "c->uwcache_kernel.state = uwcache_uninitialized;";
+  s.op->newline() << "#endif";
+
+  s.op->newline() << "#if defined(STAP_NEED_CONTEXT_RETURNVAL)";
+  s.op->newline() << "c->returnval_override_p = 0;";
+  s.op->newline() << "c->returnval_override = 0;"; // unnecessary
   s.op->newline() << "#endif";
 }
 
@@ -2527,7 +2534,7 @@ validate_module_elf (Dwfl_Module *mod, const char *name,  base_query *q)
       throw SEMANTIC_ERROR(msg.str ());
     }
 
-  if (q->sess.verbose>1)
+  if (q->sess.verbose>2)
     clog << _F("focused on module '%s' = [%#" PRIx64 "-%#" PRIx64 ", bias %#" PRIx64
                " file %s ELF machine %s|%s (code %d)\n",
                q->dw.module_name.c_str(), q->dw.module_start, q->dw.module_end,
@@ -4522,7 +4529,7 @@ dwarf_var_expanding_visitor::visit_target_symbol (target_symbol *e)
 				     ctx.e, lvalue, &endtype);
 
       string fname = (string(lvalue ? "_dwarf_tvar_set" : "_dwarf_tvar_get")
-                      + "_" + escaped_indentifier_string (e->sym_name())
+                      + "_" + escaped_identifier_string (e->sym_name())
                       + "_" + lex_cast(tick++));
 
       functioncall* n = synthetic_embedded_deref_call(q.dw, ctx, fname,
@@ -7472,17 +7479,14 @@ sdt_query::handle_query_module()
       GElf_Shdr *shdr = dw.get_section (".stapsdt.base", &shdr_mem);
 
       // The 'base' lets us adjust the hardcoded addresses in notes for prelink
-      // effects.  The 'semaphore_load_offset' accounts for the difference in
-      // load addresses between text and data, so the semaphore can be
-      // converted to a file offset if needed.
+      // effects.  The 'semaphore_load_offset' is the load address of the .probes
+      // section so the semaphore can be converted to a section offset if needed.
       if (shdr)
 	{
 	  base = shdr->sh_addr;
-	  GElf_Addr base_offset = shdr->sh_offset;
 	  shdr = dw.get_section (".probes", &shdr_mem);
 	  if (shdr)
-	    semaphore_load_offset =
-	      (shdr->sh_addr - shdr->sh_offset) - (base - base_offset);
+	    semaphore_load_offset = shdr->sh_addr - shdr->sh_offset;
 	}
       else
 	base = semaphore_load_offset = 0;
@@ -7880,7 +7884,7 @@ suggest_marks(systemtap_session& sess,
               const string& mark,
               const string& provider)
 {
-  if (mark.empty() || modules.empty() || sess.module_cache == NULL)
+  if (mark.empty() || modules.empty() || sess.module_cache == NULL || sess.suppress_costly_diagnostics)
     return "";
 
   // PR18577: There isn't any point in generating a suggestion list if
@@ -7945,7 +7949,7 @@ suggest_plt_functions(systemtap_session& sess,
                       const set<string>& modules,
                       const string& func)
 {
-  if (func.empty() || modules.empty() || sess.module_cache == NULL)
+  if (func.empty() || modules.empty() || sess.module_cache == NULL || sess.suppress_costly_diagnostics)
     return "";
 
   // PR18577: There isn't any point in generating a suggestion list if
@@ -7992,7 +7996,7 @@ suggest_dwarf_functions(systemtap_session& sess,
   if (pos != string::npos)
     func.erase(pos);
 
-  if (func.empty() || modules.empty() || sess.module_cache == NULL)
+  if (func.empty() || modules.empty() || sess.module_cache == NULL || sess.suppress_costly_diagnostics)
     return "";
 
   // PR18577: There isn't any point in generating a suggestion list if
@@ -10105,7 +10109,7 @@ string
 suggest_kernel_functions(const systemtap_session& session, interned_string function)
 {
   const set<interned_string>& kernel_functions = session.kernel_functions;
-  if (function.empty() || kernel_functions.empty())
+  if (function.empty() || kernel_functions.empty() || session.suppress_costly_diagnostics)
     return "";
 
   // PR18577: There isn't any point in generating a suggestion list if
@@ -10189,19 +10193,19 @@ kprobe_builder::build(systemtap_session & sess,
           vector<interned_string> matches;
 
           // Simple names can be found directly
-          if (function_string_val.find_first_of("*?[") == string::npos)
+          if (function_string_val.find_first_of("*?[{") == string::npos)
             {
               if (sess.kernel_functions.count(function_string_val))
                 matches.push_back(function_string_val);
             }
           else // Search function name list for matching names
             {
-              const string& val = function_string_val;
+              const string& val = csh_to_ksh(function_string_val);
               for (auto it = sess.kernel_functions.cbegin();
                    it != sess.kernel_functions.cend(); it++)
                 {
                   // fnmatch returns zero for matching.
-                  if (fnmatch(val.c_str(), it->to_string().c_str(), 0) == 0)
+                  if (fnmatch(val.c_str(), it->to_string().c_str(), FNM_EXTMATCH) == 0)
                     matches.push_back(*it);
                 }
             }
@@ -11638,6 +11642,22 @@ static vector<string> tracepoint_extra_decls (systemtap_session& s,
     {
       they_live.push_back ("struct drm_file;");
     }
+
+  if (header.find("cachefiles") != string::npos ||
+      header.find("fscache") != string::npos)
+    {
+      they_live.push_back ("#include <linux/fscache.h>");
+      they_live.push_back ("#include <linux/fscache-cache.h>");
+      they_live.push_back ("struct cachefiles_object;"); // fs/cachefiles/internal.h
+    }
+
+  #if 0
+  /* This doesn't work as of 4.17ish, because it interferes with subsequent tracepoints
+     coming in from other trace headers. e.g. module:module_put vs mei:module_put. */
+  if (header_exists(s, "/drivers/misc/mei/mei-trace.h"))
+    they_live.push_back ("#include \"drivers/misc/mei/mei-trace.h\"");
+  #endif
+
   return they_live;
 }
 

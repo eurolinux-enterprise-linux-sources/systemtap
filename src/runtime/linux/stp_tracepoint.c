@@ -3,7 +3,7 @@
  *
  * SystemTap layer for registering various kernel tracepoint APIs.
  *
- * Copyright (C) 2014 Red Hat Inc.
+ * Copyright (C) 2014-2018 Red Hat Inc.
  *
  * Initially derived from lttng-tracepoints.c:
  * LTTng adaptation layer for Linux kernel 3.15+ tracepoints.
@@ -278,7 +278,11 @@ int stp_tracepoint_coming(struct tp_module *tp_mod)
 		struct tracepoint_entry *e;
 		struct stp_tp_probe *p;
 
+		#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
+		tp = offset_to_ptr(&(((const int*)(tp_mod->mod->tracepoints_ptrs))[i]));
+		#else
 		tp = tp_mod->mod->tracepoints_ptrs[i];
+		#endif
 		e = get_tracepoint(tp->name);
 		if (!e) {
 			e = add_tracepoint(tp->name);
@@ -320,7 +324,11 @@ int stp_tracepoint_going(struct tp_module *tp_mod)
 		struct tracepoint_entry *e;
 		struct stp_tp_probe *p;
 
+		#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
+		tp = offset_to_ptr(&(((const int*)(tp_mod->mod->tracepoints_ptrs))[i]));
+                #else
 		tp = tp_mod->mod->tracepoints_ptrs[i];
+		#endif
 		e = get_tracepoint(tp->name);
 		if (!e || !e->tp)
 			continue;

@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <sys/resource.h>
 #include "bpfinterp.h"
 
 extern "C" {
@@ -68,9 +69,14 @@ extern "C" {
 int log_level = 0;
 };
 static int warnings = 1;
+static int exit_phase = 0;
+static int interrupt_message = 0;
 static FILE *output_f = stdout;
+static FILE *kmsg;
 
 static const char *module_name;
+static const char *module_basename;
+static const char *script_name; // name of original systemtap script
 static const char *module_license;
 static Elf *module_elf;
 
@@ -222,8 +228,55 @@ instantiate_maps (Elf64_Shdr *shdr, Elf_Data *data)
   map_attrs = attrs;
   map_fds.assign(n, -1);
 
+  /* First, make room for the maps in this process' RLIMIT_MEMLOCK: */
+  size_t rlimit_increase = 0;
   for (i = 0; i < n; ++i)
     {
+      // TODO: The 58 bytes of overhead space per entry has been
+      // decided by trial and error, and may require further tweaking:
+      rlimit_increase += (58 + attrs[i].key_size + attrs[i].value_size) * attrs[i].max_entries;
+    }
+
+  struct rlimit curr_rlimit;
+  int rc;
+
+  rc = getrlimit(RLIMIT_MEMLOCK, &curr_rlimit);
+  if (rc < 0)
+    fatal("could not get map resource limit: %s\n",
+          strerror(errno));
+
+  rlim_t rlim_orig = curr_rlimit.rlim_cur;
+  rlim_t rlim_max_orig = curr_rlimit.rlim_max;
+  curr_rlimit.rlim_cur += rlimit_increase;
+  curr_rlimit.rlim_max += rlimit_increase;
+  if (curr_rlimit.rlim_cur < rlim_orig) // handle overflow
+    curr_rlimit.rlim_cur = rlim_orig;
+  if (curr_rlimit.rlim_max < rlim_max_orig) // handle overflow
+    curr_rlimit.rlim_max = rlim_max_orig;
+
+  rc = setrlimit(RLIMIT_MEMLOCK, &curr_rlimit);
+  if (rc < 0)
+    fatal("could not increase map resource limit -- "
+          "cur from %lu to %lu, max from %lu to %lu: %s\n",
+          rlim_orig, curr_rlimit.rlim_cur,
+          rlim_max_orig, curr_rlimit.rlim_max,
+          strerror(errno));
+  if (log_level > 1)
+    {
+      fprintf(stderr, "increasing map cur resource limit from %lu to %lu\n",
+              rlim_orig, curr_rlimit.rlim_cur);
+      fprintf(stderr, "increasing map max resource limit from %lu to %lu\n",
+              rlim_max_orig, curr_rlimit.rlim_max);
+    }
+
+  /* Now create the maps: */
+  for (i = 0; i < n; ++i)
+    {
+      if (log_level > 2)
+        fprintf(stderr, "creating map entry %zu: key_size %u, value_size %u, "
+                "max_entries %u, map_flags %u\n", i,
+                attrs[i].key_size, attrs[i].value_size,
+                attrs[i].max_entries, attrs[i].map_flags);
       int fd = bpf_create_map(static_cast<bpf_map_type>(attrs[i].type),
 			      attrs[i].key_size, attrs[i].value_size,
 			      attrs[i].max_entries, attrs[i].map_flags);
@@ -261,6 +314,9 @@ prog_load(Elf_Data *data, const char *name)
   if (data->d_size % sizeof(bpf_insn))
     fatal("program size not a multiple of %zu\n", sizeof(bpf_insn));
 
+  fprintf (kmsg, "%s (%s): stapbpf: %s, name: %s, d_size: %lu\n",
+           module_basename, script_name, VERSION, name, (unsigned long)data->d_size);
+  fflush (kmsg); // Otherwise, flush will only happen after the prog runs.
   int fd = bpf_prog_load(prog_type, static_cast<bpf_insn *>(data->d_buf),
 			 data->d_size, module_license, kernel_version);
   if (fd < 0)
@@ -983,6 +1039,16 @@ static void
 load_bpf_file(const char *module)
 {
   module_name = module;
+
+  /* Extract basename: */
+  char *buf = (char *)malloc(BPF_MAXSTRINGLEN * sizeof(char));
+  string module_name_str(module);
+  string module_basename_str
+    = module_name_str.substr(module_name_str.rfind('/')+1); // basename
+  size_t len = module_basename_str.copy(buf, BPF_MAXSTRINGLEN-1);
+  buf[len] = '\0';
+  module_basename = buf;
+
   int fd = open(module, O_RDONLY);
   if (fd < 0)
     fatal_sys();
@@ -1037,6 +1103,7 @@ load_bpf_file(const char *module)
   unsigned maps_idx = 0;
   unsigned version_idx = 0;
   unsigned license_idx = 0;
+  unsigned script_name_idx = 0;
   unsigned kprobes_idx = 0;
   unsigned begin_idx = 0;
   unsigned end_idx = 0;
@@ -1071,6 +1138,8 @@ load_bpf_file(const char *module)
 
       if (strcmp(shname, "license") == 0)
 	license_idx = i;
+      else if (strcmp(shname, "stapbpf_script_name") == 0)
+	script_name_idx = i;
       else if (strcmp(shname, "version") == 0)
 	version_idx = i;
       else if (strcmp(shname, "maps") == 0)
@@ -1088,6 +1157,10 @@ load_bpf_file(const char *module)
     module_license = static_cast<char *>(sh_data[license_idx]->d_buf);
   else
     fatal("missing license section\n");
+  if (script_name_idx != 0)
+    script_name = static_cast<char *>(sh_data[script_name_idx]->d_buf);
+  else
+    script_name = "<unknown>";
   if (version_idx != 0)
     {
       unsigned long long size = shdrs[version_idx]->sh_size;
@@ -1227,6 +1300,7 @@ print_trace_output(pthread_t main_thread)
         fatal("error opening trace_pipe: %s\n", strerror(errno));
 
       bool start_tag_seen = false;
+      unsigned bytes_written = 0;
       string line, buf;
       while (getline(trace_pipe, line))
         {
@@ -1237,6 +1311,7 @@ print_trace_output(pthread_t main_thread)
               if (pos != string::npos)
                 {
                   start_tag_seen = true;
+                  bytes_written = 0;
                   line = line.substr(pos + start_tag.size(), string::npos);
                 }
             }
@@ -1251,7 +1326,8 @@ print_trace_output(pthread_t main_thread)
                   // exit() causes "" to be written to trace_pipe. If
                   // "" is seen and the exit flag is set, wake up main
                   // thread to begin program shutdown.
-                  if (line == "" && buf == "" && get_exit_status())
+                  if (line == "" && buf == "" && bytes_written == 0
+                      && get_exit_status())
                     {
                       pthread_kill(main_thread, SIGINT);
                       return;
@@ -1262,6 +1338,7 @@ print_trace_output(pthread_t main_thread)
               if (fwrite(buf.c_str(), sizeof(char), buf.size(), output_f)
                    != buf.size())
                 fatal("error writing to output file: %s\n", strerror(errno));
+              bytes_written += buf.size();
 
               fflush(output_f);
               buf = "";
@@ -1290,6 +1367,15 @@ sigint(int s)
 {
   // suppress any subsequent SIGINTs that may come from stap parent process
   signal(s, SIG_IGN);
+
+  // during the exit phase, ^C should exit immediately
+  if (exit_phase)
+    {
+      if (!interrupt_message) // avoid duplicate message
+        fprintf(stderr, "received interrupt during exit probe\n");
+      interrupt_message = 1;
+      abort();
+    }
 
   // set exit flag
   int key = bpf::globals::EXIT;
@@ -1351,6 +1437,8 @@ main(int argc, char **argv)
   if (optind != argc - 1)
     goto do_usage;
 
+  kmsg = fopen("/dev/kmsg", "a");
+
   load_bpf_file(argv[optind]);
   init_internal_globals();
 
@@ -1391,6 +1479,11 @@ main(int argc, char **argv)
   unregister_perf(perf_probes.size());
   unregister_tracepoints(tracepoint_probes.size());
 
+  // We are now running exit probes, so ^C should exit immediately:
+  exit_phase = 1;
+  signal(SIGINT, (sighandler_t)sigint); // restore previously ignored signal
+  signal(SIGTERM, (sighandler_t)sigint);
+
   // Run the end+error probes.
   if (prog_end)
     bpf_interpret(prog_end->d_size / sizeof(bpf_insn),
@@ -1398,5 +1491,6 @@ main(int argc, char **argv)
 		  map_fds, output_f);
 
   elf_end(module_elf);
+  fclose(kmsg);
   return 0;
 }

@@ -1,0 +1,128 @@
+From 6411e53fe729a987a300274f6b15fd88b737367d Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 16 Oct 2018 18:13:47 -0400
+Subject: [PATCH 04/32] stapbpf assembler WIP #3 :: additional assembly test
+ cases
+
+---
+ testsuite/systemtap.bpf/asm_tests/err_alloc.stp   | 10 ++++++++++
+ testsuite/systemtap.bpf/asm_tests/err_numeric.stp | 18 ++++++++++++++++++
+ testsuite/systemtap.bpf/asm_tests/simple.stp      |  6 +++---
+ testsuite/systemtap.bpf/asm_tests/string.stp      | 22 ++++++++++++++++++++++
+ testsuite/systemtap.bpf/asm_tests/temporary.stp   | 14 ++++++++++++++
+ 5 files changed, 67 insertions(+), 3 deletions(-)
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/err_alloc.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/err_numeric.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/string.stp
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/temporary.stp
+
+diff --git a/testsuite/systemtap.bpf/asm_tests/err_alloc.stp b/testsuite/systemtap.bpf/asm_tests/err_alloc.stp
+new file mode 100644
+index 000000000..6778a52e2
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/err_alloc.stp
+@@ -0,0 +1,10 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  alloc "not a register", BPF_MAXSTRINGLEN; /* SHOULD ERROR */
++  0xbf, $$, "fifty", -, -; /* mov $$, "fifty" */
++%}
++
++
++probe begin {
++  printf("foo(1)=%d should be fifty\n", foo(1))
++  exit()
++}
+diff --git a/testsuite/systemtap.bpf/asm_tests/err_numeric.stp b/testsuite/systemtap.bpf/asm_tests/err_numeric.stp
+new file mode 100644
+index 000000000..9428e5704
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/err_numeric.stp
+@@ -0,0 +1,18 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* verify refusal to accept gibberish */
++  0xd33333333333333333333333333333333333333333333333333333333333333333333333333334db33f, $x, -, _bar, 10; /* XTREAM opcode */
++  /* 0xb7, $$, -, huirgishvirguwishgiburg, 100; /* XTREAM 3rd arg */
++  /* 0xb7, $$, -, -, borkborkborkborkbork; /* XTREAM 4th arg */
++%}
++
++function bar:long (x:long) {
++  if (x <= 10) return 50 else return 100
++}
++
++probe begin {
++  printf("foo(1)=%d should be %d\n", foo(1), bar(1))
++  printf("foo(8)=%d should be %d\n", foo(8), bar(8))
++  printf("foo(15)=%d should be %d\n", foo(15), bar(15))
++  exit()
++}
++
+diff --git a/testsuite/systemtap.bpf/asm_tests/simple.stp b/testsuite/systemtap.bpf/asm_tests/simple.stp
+index 693219d15..17184a139 100644
+--- a/testsuite/systemtap.bpf/asm_tests/simple.stp
++++ b/testsuite/systemtap.bpf/asm_tests/simple.stp
+@@ -1,11 +1,11 @@
+ function foo:long (x:long) %{ /* bpf */ /* pure */
+   /* compute 100-x */
+-  0xb7, $$, -, -, 100; /* mov $$, ee */
++  0xb7, $$, -, -, 100; /* mov $$, 100 */
+   0x1f, $$, $x, -, -; /* sub $$, $x */
+ %}
+ 
+ probe begin {
+-  printf("foo(1)=%d\n", foo(1))
+-  printf("foo(15)=%d\n", foo(15))
++  printf("foo(1)=%d, should be 99\n", foo(1))
++  printf("foo(15)=%d, should be 85\n", foo(15))
+   exit()
+ }
+diff --git a/testsuite/systemtap.bpf/asm_tests/string.stp b/testsuite/systemtap.bpf/asm_tests/string.stp
+new file mode 100644
+index 000000000..dce665c14
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/string.stp
+@@ -0,0 +1,22 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* if x <= 10 then "fifty" else "one-hundred" */
++  0xd5, $x, -, _bar, 10; /* jsle $x, 10, _bar */
++  0xbf, $$, "one-hundred", -, -; /* mov $$, "one-hundred" */
++  0x05, -, -, _done, -; /* ja _done; */
++  label, _bar;
++  0xbf, $$, "fifty", -, -; /* mov $$, "fifty" */
++  label, _done;
++  /* 0xbf, $$, $$, -, -; /* dummy op */
++%}
++
++function bar:long (x:long) {
++  if (x <= 10) return 50 else return 100
++}
++
++probe begin {
++  printf("foo(1)=%d should be %d\n", foo(1), bar(1))
++  printf("foo(8)=%d should be %d\n", foo(8), bar(8))
++  printf("foo(15)=%d should be %d\n", foo(15), bar(15))
++  exit()
++}
++
+diff --git a/testsuite/systemtap.bpf/asm_tests/temporary.stp b/testsuite/systemtap.bpf/asm_tests/temporary.stp
+new file mode 100644
+index 000000000..153c759ba
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/temporary.stp
+@@ -0,0 +1,14 @@
++function foo:long (x:long) %{ /* bpf */ /* pure */
++  /* compute (100-x)*(x+2) */
++  0xb7, $$, -, -, 100; /* mov $$, 100 */
++  0x1f, $$, $x, -, -; /* sub $$, $x */
++  0xbf, $tmp, $x, -, -; /* mov $tmp, $x */
++  0x07, $tmp, -, -, 2; /* add $tmp, 2 */
++  0x2f, $$, $tmp, -, -; /* mul $$, $tmp */
++%}
++
++probe begin {
++  printf("foo(1)=%d, should be 99*3=297\n", foo(1))
++  printf("foo(15)=%d, should be 85*18=1530\n", foo(15))
++  exit()
++}
+-- 
+2.14.5
+

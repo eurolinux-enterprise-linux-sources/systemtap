@@ -1,0 +1,50 @@
+From 99ee8b19901f4908e2a2942731c34e03aadd9549 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 30 Oct 2018 17:10:53 -0400
+Subject: [PATCH 13/32] bpf-translate.cxx :: fix segfault with malformed
+ register
+
+---
+ bpf-translate.cxx                                  | 9 +++++++--
+ testsuite/systemtap.bpf/asm_tests/err-regparse.stp | 9 +++++++++
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+ create mode 100644 testsuite/systemtap.bpf/asm_tests/err-regparse.stp
+
+diff --git a/bpf-translate.cxx b/bpf-translate.cxx
+index bb133bae5..d46dae44a 100644
+--- a/bpf-translate.cxx
++++ b/bpf-translate.cxx
+@@ -952,8 +952,13 @@ bpf_unparser::emit_asm_arg (const asm_stmt &stmt, const std::string &arg,
+     {
+       /* arg is a register number */
+       std::string reg = arg[0] == 'r' ? arg.substr(1) : arg;
+-      unsigned long num = stoul(reg, 0, 0);
+-      if (num > 10)
++      unsigned long num;
++      bool parsed = false;
++      try {
++        num = stoul(reg, 0, 0);
++        parsed = true;
++      } catch (std::exception &e) {} // XXX: invalid_argument, out_of_range
++      if (!parsed || num > 10)
+ 	throw SEMANTIC_ERROR (_F("invalid bpf register '%s'",
+                                  arg.c_str()), stmt.tok);
+       return this_prog.lookup_reg(num);
+diff --git a/testsuite/systemtap.bpf/asm_tests/err-regparse.stp b/testsuite/systemtap.bpf/asm_tests/err-regparse.stp
+new file mode 100644
+index 000000000..ba66800e6
+--- /dev/null
++++ b/testsuite/systemtap.bpf/asm_tests/err-regparse.stp
+@@ -0,0 +1,9 @@
++function foo:long () %{ /* bpf */ /* pure */
++  0xb7, $rc, -, -, 50; /* mov $rc, 50 */
++  0xbf, $$, rc, -, -; /* mov $$, $rc -- TYPO */
++%}
++
++probe begin {
++  printf("foo()=%d should be fifty\n", foo())
++  exit()
++}
+-- 
+2.14.5
+

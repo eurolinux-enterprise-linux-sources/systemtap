@@ -1,5 +1,5 @@
 // bpf internal classes
-// Copyright (C) 2016 Red Hat Inc.
+// Copyright (C) 2016-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -29,6 +29,12 @@ namespace bpf {
 
 #define MAX_BPF_STACK 512
 #define BPF_REG_SIZE 8
+#define BPF_MAXSTRINGLEN 64
+#define BPF_MAXFORMATLEN 256
+#define BPF_MAXMAPENTRIES 2048
+// TODO: add BPF_MAXSPRINTFLEN
+// TODO: BPF_MAX{STRING,FORMAT}LEN,BPF_MAXMAPENTRIES,BPF_MAXSPRINTFLEN should be user-configurable.
+// XXX: BPF_MAXMAPENTRIES may depend on kernel version. May need to experiment with rlimit in instantiate_maps().
 
 typedef unsigned short regno;
 static const regno max_regno = BPF_MAXINSNS;
@@ -47,24 +53,33 @@ enum condition
 
 struct value
 {
-  enum value_type { UNINIT, IMM, HARDREG, TMPREG };
+  enum value_type { UNINIT,
+                    IMM,
+                    STR, /* <- lowered to HARDREG by the optimizer */
+                    HARDREG,
+                    TMPREG, /* <- lowered to HARDREG by the optimizer */ };
 
   value_type type	: 16;
   regno reg_val		: 16;
   int64_t imm_val;
+  std::string str_val;
 
-  value(value_type t = UNINIT, regno r = noreg, int64_t c = 0)
-    : type(t), reg_val(r), imm_val(c)
+  value(value_type t = UNINIT, regno r = noreg, int64_t c = 0, std::string s = "")
+    : type(t), reg_val(r), imm_val(c), str_val(s)
   { }
 
   static value mk_imm(int64_t i) { return value(IMM, noreg, i); }
+  static value mk_str(std::string s) { return value(STR, noreg, 0, s); }
   static value mk_reg(regno r) { return value(TMPREG, r); }
   static value mk_hardreg(regno r) { return value(HARDREG, r); }
 
   bool is_reg() const { return type >= HARDREG; }
   bool is_imm() const { return type == IMM; }
+  bool is_str() const { return type == STR; }
+
   regno reg() const { assert(is_reg()); return reg_val; }
   int64_t imm() const { assert(is_imm()); return imm_val; }
+  std::string str() const { assert(is_str()); return str_val; }
 
   std::ostream& print(std::ostream &) const;
 };
@@ -86,10 +101,11 @@ unsigned bpf_function_nargs (unsigned id);
 
 const opcode BPF_LD_MAP = BPF_LD | BPF_IMM | BPF_DW | (BPF_PSEUDO_MAP_FD << 8);
 
-// Not actually a BPF helper, but treating it like one simplifies
-// some of the interpreter logic. We give it an ID that won't conflict
-// with IDs of real BPF helpers.
-const bpf_func_id BPF_FUNC_map_get_next_key = __BPF_FUNC_MAX_ID;
+// Not actual BPF helpers, but treating them like one simplifies some of the
+// interpreter logic. We give them IDs that shouldn't conflict with IDs of
+// real BPF helpers.
+const bpf_func_id BPF_FUNC_map_get_next_key    = (bpf_func_id) -1;
+const bpf_func_id BPF_FUNC_sprintf             = (bpf_func_id) -2;
 
 
 struct insn
@@ -203,12 +219,16 @@ struct program
 
   std::vector<value> hardreg_vals;
   std::vector<value *> reg_vals;
+
+  // Store at most one of each IMM and STR value:
   std::unordered_map<int64_t, value *> imm_map;
+  std::unordered_map<std::string, value *> str_map;
 
   regno max_reg() const { return reg_vals.size() + MAX_BPF_REG; }
   value *lookup_reg(regno r);
   value *new_reg();
   value *new_imm(int64_t);
+  value *new_str(std::string);
 
   // The BPF local stack is [0, -512] indexed off BPF_REG_10.
   // The translator has dibs on the low bytes, [0, -max_tmp_space],
@@ -240,6 +260,10 @@ struct program
   void generate();
   void print(std::ostream &) const;
 };
+
+// ??? Properly belongs to bpf_unparser but must be accessible from bpf-opt.cxx:
+value *emit_literal_str(program &this_prog, insn_inserter &this_ins,
+                        value *dest, int ofs, std::string &src, bool zero_pad = false);
 
 inline std::ostream&
 operator<< (std::ostream &o, const program &c)

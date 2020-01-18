@@ -1,6 +1,10 @@
 /* Included once by translate.cxx c_unparser::emit_common_header ()
    Defines all common fields and probe flags for struct context.
-   Available to C-based probe handlers as fields of the CONTEXT ptr.  */
+   Available to C-based probe handlers as fields of the CONTEXT ptr.
+
+   NB: new fields may need manual initialization as a part of
+   tapsets.cxx common_probe_entryfn_prologue()!
+*/
 
 #ifdef __DYNINST__
 
@@ -70,6 +74,11 @@ int nesting;
  * if no more alternatives are to be executed. */
 int next;
 
+/* A flag to signal aborting the currently running probe handler.
+   While it's 0, execution continues
+   When it's 1, probe code unwnds. */
+int aborted;
+
 /* A place to format error messages into if some error occurs, last_error
    will then be pointed here.  */
 string_t error_buffer;
@@ -103,6 +112,12 @@ struct stapregex_match {
 } last_match;
 #endif
 
+/* Used in errno.stp for deprecated use of returnval() in syscall.*.return aliases */
+#ifdef STAP_NEED_CONTEXT_RETURNVAL
+  int64_t returnval_override;
+  int returnval_override_p;
+#endif
+
 /* NB: last_error is used as a health flag within a probe.
    While it's 0, execution continues
    When it's "something", probe code unwinds, _stp_error's, sets error state */
@@ -113,8 +128,9 @@ const char *last_stmt;
 /* Set when probe handler gets pt_regs handed to it. kregs holds the kernel
    registers when availble. uregs holds the user registers when available.
    uregs are at least available when user_mode_p == 1.  */
-struct pt_regs *kregs;
-struct pt_regs *uregs;
+struct pt_regs *kregs; /* !user_mode_p */
+struct pt_regs *uregs; /* user_mode_p */
+struct pt_regs *sregs; /* syscall mode only, untrustworthy since user-controlled */
 
 /* unwaddr is caching unwound address in each probe handler on ia64. */
 #if defined __ia64__

@@ -1,6 +1,6 @@
 /* -*- linux-c -*- 
  * Print Functions
- * Copyright (C) 2007-2011 Red Hat Inc.
+ * Copyright (C) 2007-2018 Red Hat Inc.
  *
  * This file is part of systemtap, and is free software.  You can
  * redistribute it and/or modify it under the terms of the GNU General
@@ -193,10 +193,10 @@ static void _stp_print_char (const char c)
 	pb->len ++;
 }
 
-static void _stp_print_kernel_info(char *vstr, int ctx, int num_probes)
+static void _stp_print_kernel_info(char *sname, char *vstr, int ctx, int num_probes)
 {
 	printk(KERN_DEBUG
-               "%s: systemtap: %s, base: %p"
+               "%s (%s): systemtap: %s, base: %p"
                ", memory: %ludata/%lutext/%uctx/%unet/%ualloc kb"
                ", probes: %d"
 #if ! STP_PRIVILEGE_CONTAINS (STP_PRIVILEGE, STP_PR_STAPDEV)
@@ -204,7 +204,8 @@ static void _stp_print_kernel_info(char *vstr, int ctx, int num_probes)
 #endif
                "\n",
 	       THIS_MODULE->name,
-	       vstr, 
+	       sname, /* name of source file */
+	       vstr,  /* stap version */
 #ifdef STAPCONF_MODULE_LAYOUT
 	       THIS_MODULE->core_layout.base,
 	       (unsigned long) (THIS_MODULE->core_layout.size - THIS_MODULE->core_layout.text_size)/1024,

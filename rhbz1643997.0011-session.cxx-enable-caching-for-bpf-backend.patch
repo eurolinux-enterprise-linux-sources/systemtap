@@ -1,0 +1,25 @@
+From 1f892756af4de555fb1dc70bd1c7437eecde0d31 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Fri, 26 Oct 2018 11:15:13 -0400
+Subject: [PATCH 11/32] session.cxx :: enable caching for bpf backend
+
+---
+ session.cxx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/session.cxx b/session.cxx
+index eed28bf7e..ffad3b2b5 100644
+--- a/session.cxx
++++ b/session.cxx
+@@ -1701,7 +1701,7 @@ systemtap_session::parse_cmdline_runtime (const string& opt_runtime)
+       return false;
+ #else
+       runtime_mode = bpf_runtime;
+-      use_cache = use_script_cache = false;
++      // use_cache = use_script_cache = false; // XXX: From early BPF development. Delete after making sure the cache doesn't break anything.
+ #endif
+     }
+   else if (opt_runtime == string("dyninst"))
+-- 
+2.14.5
+

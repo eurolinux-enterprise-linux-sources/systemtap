@@ -1,0 +1,26 @@
+From d3a33cd7b8c1b0bfe236bdea2bde83c9c6a83c05 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 13 Nov 2018 12:27:05 -0500
+Subject: [PATCH 30/32] PR23875 bpf.exp: fail testcase on 'stack smashing'
+
+---
+ testsuite/systemtap.bpf/bpf.exp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/testsuite/systemtap.bpf/bpf.exp b/testsuite/systemtap.bpf/bpf.exp
+index e8e94bf19..3f32b6c79 100644
+--- a/testsuite/systemtap.bpf/bpf.exp
++++ b/testsuite/systemtap.bpf/bpf.exp
+@@ -58,6 +58,9 @@ proc stapbpf_run { TEST_NAME OUTPUT_STR args } {
+ 
+             expect {
+                 -timeout 20
++                -re "stack smashing detected" {
++                    set rc $bad_output
++                }
+                 -re $pass_str  {
+                     set rc $pass
+                 }
+-- 
+2.14.5
+

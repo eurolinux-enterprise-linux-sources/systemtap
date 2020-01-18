@@ -1,6 +1,6 @@
 /* -*- linux-c -*- 
  * Map Functions
- * Copyright (C) 2005-2016 Red Hat Inc.
+ * Copyright (C) 2005-2018 Red Hat Inc.
  *
  * This file is part of systemtap, and is free software.  You can
  * redistribute it and/or modify it under the terms of the GNU General
@@ -272,7 +272,7 @@ static void _stp_map_sortn(MAP map, int n, int keynum, int dir,
 		_stp_map_sort(map, keynum, dir, get_key);
 	} else {
 		struct mlist_head *head = &map->head;
-		struct mlist_head *c, *a, *last, *tmp;
+		struct mlist_head *c, *a = 0, *last, *tmp;
 		int num, swaps = 1;
 
 		if (mlist_empty(head))

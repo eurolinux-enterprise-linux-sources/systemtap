@@ -1,5 +1,5 @@
 // bpf translation pass
-// Copyright (C) 2016 Red Hat Inc.
+// Copyright (C) 2016-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -16,6 +16,66 @@
 #include "bpf-bitset.h"
 
 namespace bpf {
+
+// Allocate space on the stack and store a string literal in that space:
+static value *
+alloc_literal_str(program &p, insn_inserter &ins, std::string &str)
+{
+  // Append the string to existing temporary data.
+  //
+  // TODO: This could produce significant space limitations.
+  // A better solution would be to integrate with the
+  // register allocator and reclaim the space after
+  // the string literal is no longer live.
+  size_t tmp_space = p.max_tmp_space;
+  tmp_space += 4 - tmp_space % 4; // write aligned words to avoid verifier error
+  p.use_tmp_space(tmp_space);
+
+  size_t str_bytes = str.size() + 1;
+  str_bytes += 4 - str_bytes % 4; // write aligned words to avoid garbage data
+  if (tmp_space + str_bytes > MAX_BPF_STACK)
+    throw std::runtime_error("string allocation failed due to lack of room on stack");
+
+  tmp_space += str_bytes; // TODO: round up for safety?
+  p.use_tmp_space(tmp_space);
+  int ofs = -tmp_space;
+
+  value *frame = p.lookup_reg(BPF_REG_10);
+  value *out = emit_literal_str(p, ins, frame, ofs, str, false /* don't zero pad */);
+  return out;
+}
+
+static void
+lower_str_values(program &p)
+{
+  const unsigned nblocks = p.blocks.size();
+
+  for (unsigned i = 0; i < nblocks; ++i)
+    {
+      block *b = p.blocks[i];
+
+      for (insn *j = b->first; j != NULL; j = j->next)
+        {
+          value *s0 = j->src0;
+          if (s0 && s0->is_str())
+            {
+              insn_before_inserter ins(b, j);
+              std::string str0 = s0->str();
+              value *new_s0 = alloc_literal_str(p, ins, str0);
+              j->src0 = new_s0;
+            }
+
+          value *s1 = j->src1;
+          if (s1 && s1->is_str())
+            {
+              insn_before_inserter ins(b, j);
+              std::string str1 = s1->str();
+              value *new_s1 = alloc_literal_str(p, ins, str1);
+              j->src1 = new_s1;
+            }
+        }
+    }
+}
 
 static void
 fixup_operands(program &p)
@@ -758,7 +818,7 @@ finalize_allocation(std::vector<regno> &partition, program &p)
 
       // Hard registers are partition[i] == i,
       // and while other partition members should require
-      // no more than three dereferences to yeild a hard reg,
+      // no more than three dereferences to yield a hard reg,
       // we allow for up to ten dereferences.
       unsigned r = partition[i];
       for (int j = 0; r >= MAX_BPF_REG && j < 10; j++)
@@ -804,7 +864,7 @@ reg_alloc(program &p)
 
       merge(partition, ordered, life, igraph, p);
 
-      // ??? Use C++14 lambda.
+      // XXX: Consider using C++14 lambda.
       pref_sort_reg sort_obj(life);
       std::sort(ordered.begin(), ordered.end(), sort_obj);
 
@@ -875,12 +935,13 @@ post_alloc_cleanup (program &p)
 void
 program::generate()
 {
+  lower_str_values(*this);
   fixup_operands(*this);
   thread_jumps(*this);
   fold_jumps(*this);
   reorder_blocks(*this);
   reg_alloc(*this);
-  post_alloc_cleanup (*this);
+  post_alloc_cleanup(*this);
 }
 
 } // namespace bpf

@@ -1,0 +1,25 @@
+From 0e59ff192856462702191f1e6d87e5fdbfd158a3 Mon Sep 17 00:00:00 2001
+From: Serhei Makarov <smakarov@redhat.com>
+Date: Tue, 30 Oct 2018 17:11:45 -0400
+Subject: [PATCH 14/32] bpf-asm.exp bugfix :: bad_output does occur
+
+---
+ testsuite/systemtap.bpf/bpf-asm.exp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/testsuite/systemtap.bpf/bpf-asm.exp b/testsuite/systemtap.bpf/bpf-asm.exp
+index a53c7bcc4..8925cb049 100644
+--- a/testsuite/systemtap.bpf/bpf-asm.exp
++++ b/testsuite/systemtap.bpf/bpf-asm.exp
+@@ -11,7 +11,7 @@ proc stapbpf_run { TEST_NAME args } {
+     # return codes
+     set pass 0
+     #set fail 1
+-    #set bad_output 2
++    set bad_output 2
+     set eof_start 3
+     set eof_end 4
+     set timeout_start 5
+-- 
+2.14.5
+

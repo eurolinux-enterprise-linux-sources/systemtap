@@ -163,7 +163,7 @@ endif
 
 if HAVE_HTTP_SUPPORT
 stap_SOURCES += client-http.cxx
-stap_LDADD += $(libcurl_LIBS) $(jsonc_LIBS)
+stap_LDADD += $(libcurl_LIBS) $(jsonc_LIBS) $(openssl_LIBS)
 endif
 
 if BUILD_ELFUTILS
@@ -204,6 +204,9 @@ stap_sign_module_CXXFLAGS = $(AM_CXXFLAGS) @PIECXXFLAGS@ $(nss_CFLAGS)
 stap_sign_module_CFLAGS = $(AM_CFLAGS) @PIECFLAGS@ $(nss_CFLAGS)
 stap_sign_module_LDFLAGS = $(AM_LDFLAGS) @PIELDFLAGS@
 stap_sign_module_LDADD = $(nss_LIBS)
+if HAVE_HTTP_SUPPORT
+stap_sign_module_LDADD += $(openssl_LIBS)
+endif
 
 stap_authorize_cert_SOURCES = stap-authorize-cert.cxx nsscommon.cxx util.cxx
 stap_authorize_cert_CPPFLAGS = $(AM_CPPFLAGS)
@@ -211,6 +214,9 @@ stap_authorize_cert_CXXFLAGS = $(AM_CXXFLAGS) @PIECXXFLAGS@ $(nss_CFLAGS)
 stap_authorize_cert_CFLAGS = $(AM_CFLAGS) @PIECFLAGS@ $(nss_CFLAGS)
 stap_authorize_cert_LDFLAGS = $(AM_LDFLAGS) @PIELDFLAGS@
 stap_authorize_cert_LDADD = $(nss_LIBS)
+if HAVE_HTTP_SUPPORT
+stap_authorize_cert_LDADD += $(openssl_LIBS)
+endif
 
 if BUILD_SERVER
 stap_serverd_SOURCES = stap-serverd.cxx cscommon.cxx util.cxx privilege.cxx nsscommon.cxx cmdline.cxx
@@ -223,12 +229,19 @@ stap_serverd_CFLAGS += $(avahi_CFLAGS)
 stap_serverd_CXXFLAGS += $(avahi_CFLAGS)
 stap_serverd_LDADD += $(avahi_LIBS)
 endif
+if HAVE_HTTP_SUPPORT
+stap_serverd_LDADD += $(openssl_LIBS)
+endif
+
 
 stap_gen_cert_SOURCES = stap-gen-cert.cxx util.cxx nsscommon.cxx
 stap_gen_cert_CXXFLAGS = $(AM_CXXFLAGS) @PIECXXFLAGS@ $(nss_CFLAGS)
 stap_gen_cert_CFLAGS = $(AM_CFLAGS) @PIECFLAGS@ $(nss_CFLAGS)
 stap_gen_cert_LDFLAGS = $(AM_LDFLAGS) @PIELDFLAGS@
 stap_gen_cert_LDADD = $(nss_LIBS)
+if HAVE_HTTP_SUPPORT
+stap_gen_cert_LDADD += $(openssl_LIBS)
+endif
 endif
 endif
 endif
@@ -338,7 +351,7 @@ if BUILD_SERVER
 	rm -f $(DESTDIR)$(localstatedir)/log/stap-server/log
 endif
 
-SUBDIRS = . java python stapdyn staprun stapbpf doc man po httpd
+SUBDIRS = . java python stapdyn staprun stapbpf doc man po httpd stap-exporter
 # NB: the gcov target above uses this to enumarate linked binaries' build directories
 DIST_SUBDIRS = testsuite $(SUBDIRS)
 EXTRA_DIST = m4/ChangeLog
@@ -457,7 +470,7 @@ rpm: dist-gzip
 	mkdir -p `rpm --eval %_rpmdir`
 	mkdir -p `rpm --eval %_builddir`
 	mkdir -p `rpm --eval %_buildroot`
-	rpmbuild --define "_sourcedir $(PWD)/" -ta systemtap-$(VERSION).tar.gz $(RPMBUILDFLAGS)
+	rpmbuild --define "_sourcedir $(PWD)/" --define "release_override .`date +%Y%m%d%H%M`" -ta systemtap-$(VERSION).tar.gz $(RPMBUILDFLAGS)
 
 srpm: dist-gzip
 	mkdir -p `rpm --eval %_srcrpmdir`

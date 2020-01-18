@@ -1,0 +1,284 @@
+From 43f6345c9605c0fad57abfe31dda8951f6630ebf Mon Sep 17 00:00:00 2001
+From: "Frank Ch. Eigler" <fche@redhat.com>
+Date: Tue, 6 Nov 2018 16:26:57 -0500
+Subject: [PATCH 22/32] standardize ktime_get_ns() across lkm, bpf runtimes
+
+Make sure ktime_get_ns() is available across runtimes.  In the case of
+bpf, add a userspace helper to implement the function.  Add test case.
+Add a systemtap.bpf/nobpf.exp test driver, which runs all the
+bpf_tests but specifically without "--bpf", in the hope that all those
+scripts should run on the normal backend too.  PR23866 blocks some of
+that at the moment.
+---
+ stapbpf/bpfinterp.cxx                              |  13 ++
+ tapset/bpf/time.stp                                |   2 +-
+ tapset/linux/timestamp_monotonic.stp               |  11 ++
+ testsuite/systemtap.bpf/bpf_tests/ktime_get_ns.stp |  33 +++++
+ testsuite/systemtap.bpf/nonbpf.exp                 | 152 +++++++++++++++++++++
+ 5 files changed, 210 insertions(+), 1 deletion(-)
+ create mode 100644 testsuite/systemtap.bpf/bpf_tests/ktime_get_ns.stp
+ create mode 100644 testsuite/systemtap.bpf/nonbpf.exp
+
+diff --git a/stapbpf/bpfinterp.cxx b/stapbpf/bpfinterp.cxx
+index fe6eacc50..13ac8ee71 100644
+--- a/stapbpf/bpfinterp.cxx
++++ b/stapbpf/bpfinterp.cxx
+@@ -162,6 +162,16 @@ bpf_sprintf(std::vector<std::string> &strings, char *fstr,
+   return reinterpret_cast<uint64_t>(strings.back().c_str());
+ }
+ 
++uint64_t
++bpf_ktime_get_ns()
++{
++  struct timespec t;
++  clock_gettime (CLOCK_BOOTTIME, &t);
++  return (t.tv_sec * 1000000000) + t.tv_nsec;
++}
++
++
++
+ uint64_t
+ bpf_interpret(size_t ninsns, const struct bpf_insn insns[],
+               std::vector<int> &map_fds, FILE *output_f)
+@@ -374,6 +384,9 @@ bpf_interpret(size_t ninsns, const struct bpf_insn insns[],
+ 	    case BPF_FUNC_map_delete_elem:
+ 	      dr = bpf_delete_elem(map_fds[regs[1]], as_ptr(regs[2]));
+ 	      break;
++	    case BPF_FUNC_ktime_get_ns:
++              dr = bpf_ktime_get_ns();
++              break;
+ 	    case BPF_FUNC_trace_printk:
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wformat-nonliteral"
+diff --git a/tapset/bpf/time.stp b/tapset/bpf/time.stp
+index ee615330c..a1c827e73 100644
+--- a/tapset/bpf/time.stp
++++ b/tapset/bpf/time.stp
+@@ -12,7 +12,7 @@
+  * Description: This function returns the system ktime.
+  */
+ function ktime_get_ns:long ()
+-%{ /* bpf */ /* pure */ /* unprivileged */ /* stable */
++%{ /* bpf */ /* pure */ /* unprivileged */
+    0x85, 0, 0, 0, 5;	/* call BPF_FUNC_ktime_get_ns */
+    0xbf, $$, 0, 0, 0	/* movx $$, r0 */
+ %}
+diff --git a/tapset/linux/timestamp_monotonic.stp b/tapset/linux/timestamp_monotonic.stp
+index 6b6d445de..c8d142369 100644
+--- a/tapset/linux/timestamp_monotonic.stp
++++ b/tapset/linux/timestamp_monotonic.stp
+@@ -148,3 +148,14 @@ function local_clock_ms:long () {
+ function local_clock_s:long () {
+   return local_clock_ns() / 1000000000;
+ }
++
++
++/**
++ * sfunction ktime_get_ns - Number of nanoseconds since boot
++ *
++ * Description: This function returns the system ktime.
++ */
++function ktime_get_ns:long () %{
++  /* pure */ /* unprivileged */
++  STAP_RETURN ((int64_t) ktime_get_ns());
++%}
+diff --git a/testsuite/systemtap.bpf/bpf_tests/ktime_get_ns.stp b/testsuite/systemtap.bpf/bpf_tests/ktime_get_ns.stp
+new file mode 100644
+index 000000000..0b1d98e94
+--- /dev/null
++++ b/testsuite/systemtap.bpf/bpf_tests/ktime_get_ns.stp
+@@ -0,0 +1,33 @@
++global t1, t2, t3
++
++probe begin {
++  printf("BEGIN\n")
++  t1 = ktime_get_ns() // bpfinterp.cxx
++}
++
++probe timer.s(1) {
++  t2 = ktime_get_ns() // kernel bpf - XXX watch if timer.s() moves to userspace
++}
++
++probe perf.type(1).config(0).hz(1) {
++  t3 = ktime_get_ns() // kernel bpf
++}
++
++
++/*
++probe kernel.function("SOMETHING") { # to trigger kernel side bpf func
++  t3 = ktime.get.ns()
++}
++*/
++
++
++probe timer.s(5) {
++	exit()
++}
++
++probe end {
++  if (t1 > 0 && t2 > 0 && t3 > 0)
++    printf("END PASS\n")
++  else
++    printf("END FAIL\n")    
++}
+diff --git a/testsuite/systemtap.bpf/nonbpf.exp b/testsuite/systemtap.bpf/nonbpf.exp
+new file mode 100644
+index 000000000..35f6a7c99
+--- /dev/null
++++ b/testsuite/systemtap.bpf/nonbpf.exp
+@@ -0,0 +1,152 @@
++# bpf.exp
++#
++# To restrict scripts to test, set the CHECK_ONLY environment variable.
++# For example, to only test the printf and uprobes scripts, run:
++#
++#    make installcheck RUNTESTFLAGS="nonbpf.exp" CHECK_ONLY="printf uprobes"
++
++set testdir "$srcdir/$subdir/bpf_tests"
++
++# All tests should start by printing "BEGIN". If OUTPUT_STR is "", then 
++# the test passes if "END PASS" is read and fails if "END FAIL" is read. Otherwise
++# the test passes when "${OUTPUT_STR}END" is read and fails if END is read without
++# OUTPUT_STR preceeding it.
++proc stapnonbpf_run { TEST_NAME OUTPUT_STR args } { 
++    global rc
++    set rc -1
++    set begin_str "BEGIN"
++    set pass_str [expr { $OUTPUT_STR == "" ? "END PASS" : "${OUTPUT_STR}END" }]
++    set fail_str [expr { $OUTPUT_STR == "" ? "END FAIL" : "END" }]
++
++    # return codes
++    set pass 0
++    set fail 1
++    set bad_output 2
++    set eof_start 3
++    set eof_end 4
++    set timeout_start 5
++    set timeout_end 6
++    set invalid_prog 7
++    set comp_err 8
++    
++    set cmd [concat stap -v $args]
++    # don't the following: ... $test_file_name could be some transient or leftover file
++    # if [file readable $test_file_name] { lappend cmd $test_file_name }
++
++    send_log "executing: $cmd\n"
++    eval spawn $cmd
++    set mypid [exp_pid -i $spawn_id]
++    expect {
++        -timeout 30 
++        -re {^WARNING: cannot find module [^\r]*DWARF[^\r]*\r\n} {exp_continue}
++        -re {^WARNING: No unwind data for /.+\r\n} {exp_continue}
++        -re {^Pass\ ([1234]):[^\r]*\ in\ ([0-9]+)usr/([0-9]+)sys/([0-9]+)real\ ms\.\r\n}
++        {set pass$expect_out(1,string) "\t$expect_out(2,string)\t$expect_out(3,string)\t$expect_out(4,string)"; exp_continue}
++        -re {^Pass\ ([34]): using cached [^\r]+\r\n}
++        {set pass$expect_out(1,string) "\t0\t0\t0"; exp_continue}
++        -re {^Passes: via server [^\r]* using [^\r]* in [0-9]+usr/[0-9]+sys/[0-9]+real ms\.\r\n} {exp_continue}
++        -re {^Pass 5: starting run.\r\n} {exp_continue}
++        -re $begin_str {
++            # By default, "expect -re" will match up to 2000 chars.
++            # Increase this to 8K worth of data.
++            exp_match_max 8192
++
++            # Avoid PR17274 to propagate
++            set origexpinternal 1
++            if {"[exp_internal -info]" == "0"} {set origexpinternal 0}
++            #exp_internal 0
++
++            expect {
++                -timeout 20
++                -re $pass_str  {
++                    set rc $pass
++                }
++                -re $fail_str {
++                    set rc $fail
++                }
++                default {
++                    set rc $bad_output
++                }
++                timeout {
++                    set rc $timeout_end
++                    kill -INT -$mypid
++                }
++                eof { set rc $eof_end }
++            }
++            exp_internal $origexpinternal
++        }
++        -re "semantic error:" { set rc $comp_err }
++        timeout {
++            set rc $timeout_start
++            kill -INT -$mypid
++        }
++        eof { set rc $eof_start  }
++    }
++  # again for good measure with KILL after 3s
++  kill -INT -$mypid 3
++  catch close
++  wait
++  return $rc
++}
++
++proc get_output_str { test } {
++    global res
++    switch $test {
++        printf.stp { set res [string repeat "abcd123456" 3] }
++        sprintf.stp { set res [string repeat "0123456789" 2] }
++        string1.stp { set res {begin\[str0str1str2str3\]probe\[str0str1str2str3\]end\[str0str1str2str3\]} }
++        string2.stp { set res {probe0\[str0str1str2str3\]probe1\[str0str1str2str3\]end\[str0str1str2str3\]} }
++        default { set res "" }
++    }
++    return $res
++}
++
++if {[info exists env(CHECK_ONLY)]} {
++    set all_files [lsort [glob -nocomplain $testdir/*.stp]]
++    set stap_files ""
++    foreach file $env(CHECK_ONLY) {
++        if {[lsearch $all_files $testdir/$file.stp] >= 0} {
++            set stap_files "$stap_files $testdir/$file.stp"
++        }
++    }
++} else {
++    set stap_files [lsort [glob -nocomplain $testdir/*.stp]]
++}
++
++foreach file $stap_files {
++    global mypid
++    set mypid 0
++    set test [file tail $file]
++    if {! [installtest_p]} { untested $test; continue }
++
++    # create a process for the tests that require one
++    switch $test {
++        uprobes.stp {
++            eval spawn /usr/bin/sleep 20
++            set mypid [exp_pid -i $spawn_id]
++        }
++    }
++
++    set output_str [get_output_str $test]
++    verbose -log "Running $file"
++    switch [stapnonbpf_run $test $output_str $file] {
++        0 { pass $test }
++        1 { fail "$test incorrect result" }
++        2 { fail "$test unexpected output" }
++        3 { fail "$test eof (startup)" }
++        4 { fail "$test eof (shutdown)" }
++        5 { fail "$test timeout (startup)" }
++        6 { fail "$test timeout (startup)" }
++        7 { fail "$test invalid bpf program" }
++        8 { fail "$test compilation" }
++        default { fail "$test unknown return value" }
++    }
++
++    if { $mypid > 0 } {
++        kill -INT -$mypid 3
++        catch close
++        wait
++    }
++}
++
++
+-- 
+2.14.5
+

@@ -1,7 +1,7 @@
 /*
   Add the certificate contained in the given file to the given certificate database.
 
-  Copyright (C) 2011 Red Hat Inc.
+  Copyright (C) 2011-2018 Red Hat Inc.
 
   This file is part of systemtap, and is free software.  You can
   redistribute it and/or modify it under the terms of the GNU General Public
@@ -67,7 +67,7 @@ main (int argc, char **argv) {
   PK11_SetPasswordFunc (nssPasswordCallback);
 
   // Add the certificate to the database.
-  SECStatus secStatus = add_client_cert (certFileName, certDBName);
+  SECStatus secStatus = add_client_cert (certFileName, certDBName, true);
   if (secStatus != SECSuccess)
     {
       // NSS message already issued.

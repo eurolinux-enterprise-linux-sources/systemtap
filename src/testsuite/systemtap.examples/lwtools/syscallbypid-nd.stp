@@ -27,7 +27,7 @@ probe begin
 	printf("Tracing syscall completions... Hit Ctrl-C to end.\n");
 }
 
-probe nd_syscall.*.return
+probe syscall_any.return
 {
 	num[pid(), execname(), name] <<< 1;
 }
