@@ -1,5 +1,8 @@
 load_lib site.exp
 load_lib "compile_flags.exp"
+# Since 'server_ns_cleanup' is called in shutdown_server, we need to
+# include server_ns.exp here.
+load_lib "server_ns.exp"
 
 proc installtest_p {} {
     global TOOL_OPTIONS
@@ -220,6 +223,52 @@ proc print_systemtap_version {} {
 }
 
 
+# Check for the optional 'stapusr', 'stapsys', and 'stapdev' users
+# (and make sure they belong to the correct groups).
+proc systemtap_check_users {} {
+    global systemtap_stapusr_user_exists
+    global systemtap_stapsys_user_exists
+    global systemtap_stapdev_user_exists
+	     
+    # The optional 'stapusr', 'stapsys', and 'stapdev' users are used
+    # in server testing. If they don't exist, those tests won't get
+    # run.
+
+    # If we have the optional 'stapusr' user, does he belong to the
+    # 'stapusr' group (and not the 'stapdev' or 'stapsys' groups)?
+    set systemtap_stapusr_user_exists 0
+    if {! [catch {exec /usr/bin/id -nG stapusr} user_info]} {
+	if {[regexp {.*stapusr.*} "$user_info"]
+	    && ! [regexp {.*stapsys.*} "$user_info"]
+	    && ! [regexp {.*stapdev.*} "$user_info"]} {
+	    set systemtap_stapusr_user_exists 1
+	}
+    }
+
+    # If we have the optional 'stapsys' user, does he belong to the
+    # 'stapusr' and 'stapsys' groups (and not the 'stapdev' group)?
+    set systemtap_stapsys_user_exists 0
+    if {! [catch {exec /usr/bin/id -nG stapsys} user_info]} {
+	if {[regexp {.*stapusr.*} "$user_info"]
+	    && [regexp {.*stapsys.*} "$user_info"]
+	    && ! [regexp {.*stapdev.*} "$user_info"]} {
+	    set systemtap_stapsys_user_exists 1
+	}
+    }
+
+    # If we have the optional 'stapdev' user, does he belong to the
+    # 'stapusr' and 'stapdev' groups (it doesn't really matter about
+    # the 'stapsys' group)?
+    set systemtap_stapdev_user_exists 0
+    if {! [catch {exec /usr/bin/id -nG stapdev} user_info]} {
+	if {[regexp {.*stapusr.*} "$user_info"]
+	    && [regexp {.*stapdev.*} "$user_info"]} {
+	    set systemtap_stapdev_user_exists 1
+	}
+    }
+}
+
+
 proc setup_systemtap_environment {} {
     global srcdir env server_pid systemtap_dyninst_p
     global systemtap_nss_p systemtap_java_p
@@ -345,6 +394,7 @@ proc setup_systemtap_environment {} {
       set kill_needs_doubledash 0
     }
 
+    systemtap_check_users
     arch_compile_init
     return 1
 }
@@ -383,6 +433,9 @@ proc shutdown_server {} {
     } else {
 	verbose -log "shutdown_server: no servers (after $waited tries)"
     }
+
+    # Cleanup the custom server namespace (if needed).
+    server_ns_cleanup
 }
 
 # Set up the environment so that tests will be performed using the systemtap
@@ -404,6 +457,12 @@ proc setup_server { args } {
     }
 
     # Make sure that stap can find the server.
+    #
+    # Why is the server immediately trusted as an SSL peer without
+    # running "stap --trust-servers=ssl ..."? The server is always
+    # trusted by the user that started it. Technically, the
+    # certificates get saved under ~/.systemtap/ssl (of the user that
+    # started the server).
     set waited 0
     set use_server --use-server
     set res 0
@@ -586,7 +645,7 @@ proc environment_sanity_test {} {
     # it is allowed have bad var location descriptors (which will cause
     # some tests to fail of course). Just test -p2, kernel-devel smoke
     # test above does a full module build, we don't need another one.
-    if {[catch {exec stap --skip-badvars -w -p2 -e {probe dw_syscall.open {println (argstr)}} 2>@ stdout} result]} {
+    if {[catch {exec stap --skip-badvars -w -p2 -e {probe kernel.function("do_exit") {println ($code)}} 2>@ stdout} result]} {
         puts "\n\n\n**** failed systemtap kernel-debuginfo smoke test:\n"
         puts $result
     #    puts "****\n"

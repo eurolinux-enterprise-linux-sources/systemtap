@@ -5,7 +5,7 @@ AUTOMAKE_OPTIONS = dejagnu no-dist subdir-objects
 
 all-local:
 	@echo Run \"make check\" or \"make installcheck\".
-	@if test -n "$(DEJAZILLA)"; then echo Test results will be emailed to $(DEJAZILLA); fi
+	@if test -n "$(DEJAZILLA)"; then echo Test results will be sent to $(DEJAZILLA); fi
 
 clean-local:
 	-rm -f ./stap site.exp systemtap.sum systemtap.log
@@ -46,7 +46,11 @@ SKIPTESTS=--ignore \'$(shell \
 # That's why we need to add "execrc" to $(RUNTEST) - to ensure that this
 # subtarget gets run even if runtest per se exits with a failure.
 check-local:
-	if test -n "$(DEJAZILLA)"; then mail $(DEJAZILLA) < systemtap.sum; fi
+	if test `( expr "$(DEJAZILLA)" : '.*://.*' )` -ne 0; then \
+	  curl -F file=@systemtap.sum $(DEJAZILLA); \
+	elif test `( expr "$(DEJAZILLA)" : '.*@.*' )` -ne 0; then \
+	  mail $(DEJAZILLA) < systemtap.sum; \
+	fi
 
 # but installcheck does not follow an implicit check-DEJAGNU, go figure
 installcheck: site.exp
@@ -64,7 +68,11 @@ installcheck: site.exp
 	  rm -f systemtap.temp1.log systemtap.temp1.sum systemtap.temp2.log systemtap.temp2.sum; \
 	fi
 	-tail systemtap.sum
-	if test -n "$(DEJAZILLA)"; then mail $(DEJAZILLA) < systemtap.sum; fi
+	if test `( expr "$(DEJAZILLA)" : '.*://.*' )` -ne 0; then \
+	  curl -F file=@systemtap.sum $(DEJAZILLA); \
+	elif test `( expr "$(DEJAZILLA)" : '.*@.*' )` -ne 0; then \
+	  mail $(DEJAZILLA) < systemtap.sum; \
+	fi
 
 
 # In the parallel mode, the dg-extract-results.sh generates common .sum and .log
@@ -159,7 +167,7 @@ list-unfinished:
 # are overridden by "make check" from full source/build tree
 SYSTEMTAP_RUNTIME=$(DESTDIR)$(pkgdatadir)/runtime
 SYSTEMTAP_TAPSET=$(DESTDIR)$(pkgdatadir)/tapset
-LD_LIBRARY_PATH=$(DESTDIR)$(libdir)/systemtap
+LD_LIBRARY_PATH=$(DESTDIR)$(libdir)/systemtap:$(DESTDIR)$(libdir)/dyninst
 CRASH_LIBDIR=$(DESTDIR)$(libdir)/systemtap
 SYSTEMTAP_PATH=$(DESTDIR)$(bindir)
 SYSTEMTAP_INCLUDES=$(DESTDIR)$(includedir)
@@ -169,8 +177,9 @@ PYTHON=@python@
 PYEXECDIR=@pyexecdir@
 PYTHON3=@python3@
 PY3EXECDIR=@py3execdir@
+SYSCONFDIR=@sysconfdir@
 
 RUNTESTDEFAULTFLAGS = --tool $$tool --tool_opts \'$(TOOL_OPTS)\' --srcdir $(shell readlink -f $(srcdir))
 EXPECT = expect
-RUNTEST= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) $(srcdir)/execrc runtest
-RUNTEST2= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) runtest
+RUNTEST= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) $(srcdir)/execrc runtest
+RUNTEST2= env XDG_DATA_DIRS= SYSTEMTAP_SYNC=1 LANG=C SYSTEMTAP_TESTREMOTES=$(TESTREMOTES) SYSTEMTAP_TESTAPPS=$(TESTAPPS) SYSTEMTAP_RUNTIME=$(SYSTEMTAP_RUNTIME) SYSTEMTAP_TAPSET=$(SYSTEMTAP_TAPSET) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) CRASH_LIBDIR=$(CRASH_LIBDIR) PATH=$(SYSTEMTAP_PATH):$$PATH SYSTEMTAP_PATH=$(SYSTEMTAP_PATH) SYSTEMTAP_INCLUDES=$(SYSTEMTAP_INCLUDES) PKGLIBDIR=$(pkglibexecdir) PYTHON=$(PYTHON) PYEXECDIR=$(PYEXECDIR) PYTHON3=$(PYTHON3) PY3EXECDIR=$(PY3EXECDIR) SYSCONFDIR=$(SYSCONFDIR) runtest

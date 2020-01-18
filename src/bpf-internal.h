@@ -27,6 +27,9 @@ struct vardecl;
 
 namespace bpf {
 
+#define MAX_BPF_STACK 512
+#define BPF_REG_SIZE 8
+
 typedef unsigned short regno;
 static const regno max_regno = BPF_MAXINSNS;
 static const regno noreg = -1;
@@ -82,6 +85,12 @@ const char *bpf_function_name (unsigned id);
 unsigned bpf_function_nargs (unsigned id);
 
 const opcode BPF_LD_MAP = BPF_LD | BPF_IMM | BPF_DW | (BPF_PSEUDO_MAP_FD << 8);
+
+// Not actually a BPF helper, but treating it like one simplifies
+// some of the interpreter logic. We give it an ID that won't conflict
+// with IDs of real BPF helpers.
+const bpf_func_id BPF_FUNC_map_get_next_key = __BPF_FUNC_MAX_ID;
+
 
 struct insn
 {

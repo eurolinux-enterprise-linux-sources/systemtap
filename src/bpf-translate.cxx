@@ -178,6 +178,7 @@ struct bpf_unparser : public throwing_visitor
   virtual void visit_expr_statement (expr_statement *s);
   virtual void visit_if_statement (if_statement* s);
   virtual void visit_for_loop (for_loop* s);
+  virtual void visit_foreach_loop (foreach_loop* s);
   virtual void visit_return_statement (return_statement* s);
   virtual void visit_break_statement (break_statement* s);
   virtual void visit_continue_statement (continue_statement* s);
@@ -194,6 +195,7 @@ struct bpf_unparser : public throwing_visitor
   virtual void visit_assignment (assignment* e);
   virtual void visit_symbol (symbol* e);
   virtual void visit_arrayindex (arrayindex *e);
+  virtual void visit_array_in (array_in* e);
   virtual void visit_functioncall (functioncall* e);
   virtual void visit_print_format (print_format* e);
   virtual void visit_target_register (target_register* e);
@@ -206,8 +208,10 @@ struct bpf_unparser : public throwing_visitor
   void emit_store(expression *dest, value *src);
   value *emit_expr(expression *e);
   value *emit_bool(expression *e);
+  value *emit_context_var(bpf_context_vardecl *v);
   value *parse_reg(const std::string &str, embeddedcode *s);
 
+  void add_prologue();
   locals_map *new_locals(const std::vector<vardecl *> &);
 
   bpf_unparser (program &c, globals &g);
@@ -488,6 +492,7 @@ bpf_unparser::emit_store(expression *e, value *val)
 	      throw SEMANTIC_ERROR(_("unhandled array type"), v->tok);
 	    }
 
+          this_prog.use_tmp_space(-val_ofs);
 	  this_prog.load_map(this_ins, this_prog.lookup_reg(BPF_REG_1),
 			     g->second.first);
           emit_mov(this_prog.lookup_reg(BPF_REG_4), this_prog.new_imm(0));
@@ -755,6 +760,100 @@ bpf_unparser::visit_for_loop (for_loop* s)
 }
 
 void
+bpf_unparser::visit_foreach_loop(foreach_loop* s)
+{
+  if (s->indexes.size() != 1)
+   throw SEMANTIC_ERROR(_("unhandled multi-dimensional array"), s->tok);
+
+  vardecl *keydecl = s->indexes[0]->referent;
+  auto i = this_locals->find(keydecl);
+  if (i == this_locals->end())
+    throw SEMANTIC_ERROR(_("unknown index"), keydecl->tok);
+
+  symbol *a;
+  if (! (a = dynamic_cast<symbol *>(s->base)))
+    throw SEMANTIC_ERROR(_("unknown type"), s->base->tok);
+  vardecl *arraydecl = a->referent;
+
+  auto g = glob.globals.find(arraydecl);
+  if (g == glob.globals.end())
+    throw SEMANTIC_ERROR(_("unknown array"), arraydecl->tok);
+
+  int map_id = g->second.first;
+  value *limit = this_prog.new_reg();
+  value *key = i->second;
+  value *i0 = this_prog.new_imm(0);
+  value *key_ofs = this_prog.new_imm(-8);
+  value *newkey_ofs = this_prog.new_imm(-16);
+  value *frame = this_prog.lookup_reg(BPF_REG_10);
+  block *body_block = this_prog.new_block ();
+  block *load_block = this_prog.new_block();
+  block *iter_block = this_prog.new_block ();
+  block *join_block = this_prog.new_block ();
+
+  // Track iteration limit.
+  if (s->limit)
+    this_prog.mk_mov(this_ins, limit, emit_expr(s->limit));
+  else
+    this_prog.mk_mov(this_ins, limit, this_prog.new_imm(-1));
+
+  // Get the first key.
+  this_prog.load_map (this_ins, this_prog.lookup_reg(BPF_REG_1), map_id);
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_2), i0);
+  this_prog.mk_binary (this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_3), 
+                       frame, newkey_ofs); 
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_4),
+                    this_prog.new_imm(s->sort_direction));
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_5), limit);
+  this_prog.mk_call (this_ins, BPF_FUNC_map_get_next_key, 5);
+  this_prog.mk_jcond (this_ins, NE, this_prog.lookup_reg(BPF_REG_0), i0,
+                      join_block, load_block);
+
+  this_prog.use_tmp_space(16);
+
+  emit_jmp(load_block);
+
+  // Do loop body
+  loop_break.push_back (join_block);
+  loop_cont.push_back (iter_block);
+
+  set_block(body_block);
+  emit_stmt(s->block);
+  if (in_block ())
+    emit_jmp(iter_block);
+
+  loop_cont.pop_back ();
+  loop_break.pop_back ();
+
+  // Call map_get_next_key, exit loop if it doesn't return 0
+  set_block(iter_block);
+
+  this_prog.load_map (this_ins, this_prog.lookup_reg(BPF_REG_1), map_id);
+  this_prog.mk_st (this_ins, BPF_DW, frame, -8, key);
+  this_prog.mk_binary (this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_2),
+                       frame, key_ofs);
+  this_prog.mk_binary (this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_3),
+                       frame, newkey_ofs);
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_4),
+                    this_prog.new_imm(s->sort_direction));
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_5), limit);
+  this_prog.mk_call (this_ins, BPF_FUNC_map_get_next_key, 5);
+  this_prog.mk_jcond (this_ins, NE, this_prog.lookup_reg(BPF_REG_0), i0,
+                      join_block, load_block);
+
+  // Load next key, decrement limit if applicable
+  set_block(load_block);
+  this_prog.mk_ld (this_ins, BPF_DW, key, frame, -16);
+
+  if (s->limit)
+      this_prog.mk_binary (this_ins, BPF_ADD, limit, limit, this_prog.new_imm(-1));
+
+  emit_jmp(body_block);
+  set_block(join_block);
+}
+
+
+void
 bpf_unparser::visit_break_statement (break_statement* s)
 {
   if (loop_break.empty ())
@@ -862,6 +961,8 @@ bpf_unparser::visit_delete_statement (delete_statement *s)
 	    default:
 	      throw SEMANTIC_ERROR(_("unhandled index type"), e->tok);
 	    }
+
+          this_prog.use_tmp_space(-key_ofs);
 	  this_prog.load_map(this_ins, this_prog.lookup_reg(BPF_REG_1),
 			     g->second.first);
 	  this_prog.mk_call(this_ins, BPF_FUNC_map_delete_elem, 2);
@@ -1091,11 +1192,69 @@ bpf_unparser::visit_assignment (assignment* e)
   result = r;
 }
 
+value *
+bpf_unparser::emit_context_var(bpf_context_vardecl *v)
+{
+  // similar to visit_target_deref but the size/offset info
+  // is given in v->size/v->offset instead of an expression.
+  value *d = this_prog.new_reg();
+
+  if (v->size > 8)
+    {
+      // Compute a pointer but do not dereference. Needed
+      // for array context variables.
+      this_prog.mk_binary (this_ins, BPF_ADD, d, this_in_arg0,
+                           this_prog.new_imm(v->offset));
+
+      return d;
+    }
+
+  value *frame = this_prog.lookup_reg(BPF_REG_10);
+
+  this_prog.mk_binary (this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_3),
+                       this_in_arg0, this_prog.new_imm(v->offset));
+  this_prog.mk_mov (this_ins, this_prog.lookup_reg(BPF_REG_2),
+                    this_prog.new_imm(v->size));
+  this_prog.mk_binary (this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_1),
+                       frame, this_prog.new_imm(-v->size));
+  this_prog.use_tmp_space (v->size);
+
+  this_prog.mk_call (this_ins, BPF_FUNC_probe_read, 3);
+
+  int opc;
+  switch (v->size)
+    {
+    case 1: opc = BPF_B; break;
+    case 2: opc = BPF_H; break;
+    case 4: opc = BPF_W; break;
+    case 8: opc = BPF_DW; break;
+
+    default: assert(0);
+    }
+
+  this_prog.mk_ld (this_ins, opc, d, frame, -v->size);
+
+  if (v->is_signed && v->size < 8)
+    {
+      value *sh = this_prog.new_imm ((8 - v->size) * 8);
+      this_prog.mk_binary (this_ins, BPF_LSH, d, d, sh);
+      this_prog.mk_binary (this_ins, BPF_ARSH, d, d, sh);
+    }
+
+  return d;
+}
+
 void
 bpf_unparser::visit_symbol (symbol *s)
 {
   vardecl *v = s->referent;
-  assert (v->arity == 0);
+  assert (v->arity < 1);
+
+  if (bpf_context_vardecl *c = dynamic_cast<bpf_context_vardecl*>(v))
+    {
+      result = emit_context_var(c);
+      return;
+    }
 
   auto g = glob.globals.find (v);
   if (g != glob.globals.end())
@@ -1183,20 +1342,103 @@ bpf_unparser::visit_arrayindex(arrayindex *e)
 
       value *r0 = this_prog.lookup_reg(BPF_REG_0);
       value *i0 = this_prog.new_imm(0);
-      block *cont_block = this_prog.new_block();
-      block *exit_block = get_exit_block();
-      this_prog.mk_call(this_ins, BPF_FUNC_map_lookup_elem, 2);
-      this_prog.mk_jcond(this_ins, EQ, r0, i0, exit_block, cont_block);
-
-      set_block(cont_block);
+      block *t_block = this_prog.new_block();
+      block *f_block = this_prog.new_block();
+      block *join_block = this_prog.new_block();
       result = this_prog.new_reg();
+
+      this_prog.mk_call(this_ins, BPF_FUNC_map_lookup_elem, 2);
+      this_prog.mk_jcond(this_ins, EQ, r0, i0, t_block, f_block);
+
+      // Key is not in the array. Evaluate to 0.
+      set_block(t_block);
+      emit_mov(result, i0);
+      emit_jmp(join_block);
+
+      // Key is in the array. Get value from stack.
+      set_block(f_block);
       if (v->type == pe_long)
 	this_prog.mk_ld(this_ins, BPF_DW, result, r0, 0);
       else
 	emit_mov(result, r0);
+
+      emit_jmp(join_block);
+      set_block(join_block);
     }
   else
     throw SEMANTIC_ERROR(_("unhandled arrayindex expression"), e->tok);
+}
+
+void
+bpf_unparser::visit_array_in(array_in* e)
+{
+  arrayindex *a = e->operand;
+
+  if (symbol *s = dynamic_cast<symbol *>(a->base))
+    {
+      vardecl *v = s->referent;
+
+      if (v->arity != 1)
+        throw SEMANTIC_ERROR(_("unhandled multi-dimensional array"), v->tok);
+
+      auto g = glob.globals.find (v);
+
+      if (g == glob.globals.end())
+        throw SEMANTIC_ERROR(_("unknown variable"), v->tok);
+
+      value *idx = emit_expr(a->indexes[0]);
+
+      switch(v->index_types[0])
+        {
+        case pe_long:
+          {
+            value *frame = this_prog.lookup_reg(BPF_REG_10);
+
+            this_prog.mk_st(this_ins, BPF_DW, frame, -8, idx);
+            this_prog.use_tmp_space(8);
+            this_prog.mk_binary(this_ins, BPF_ADD,
+                                this_prog.lookup_reg(BPF_REG_2),
+                                frame, this_prog.new_imm(-8));
+          }
+          break;
+        // ??? pe_string
+        default:
+          throw SEMANTIC_ERROR(_("unhandled index type"), e->tok);
+        }
+
+      this_prog.load_map(this_ins, this_prog.lookup_reg(BPF_REG_1),
+                         g->second.first);
+      this_prog.mk_call(this_ins, BPF_FUNC_map_lookup_elem, 2);
+
+      value *r0 = this_prog.lookup_reg(BPF_REG_0);
+      value *i0 = this_prog.new_imm(0);
+      value *i1 = this_prog.new_imm(1);
+      value *d = this_prog.new_reg();
+
+      block *b0 = this_prog.new_block();
+      block *b1 = this_prog.new_block();
+      block *cont_block = this_prog.new_block();
+
+      this_prog.mk_jcond(this_ins, EQ, r0, i0, b0, b1);
+
+      // d = 0
+      set_block(b0);
+      this_prog.mk_mov(this_ins, d, i0);
+      b0->fallthru = new edge(b0, cont_block);
+
+      // d = 1
+      set_block(b1);
+      this_prog.mk_mov(this_ins, d, i1);
+      b1->fallthru = new edge(b1, cont_block);
+
+      set_block(cont_block);
+      result = d;
+
+      return;
+    }
+  /// ??? hist_op
+
+  throw SEMANTIC_ERROR(_("unhandled operand type"), a->base->tok);
 }
 
 void
@@ -1453,6 +1695,11 @@ bpf_unparser::visit_functioncall (functioncall *e)
 
   assert (e->args.size () == f->formal_args.size ());
 
+  // ??? Needed for testsuite to run. This should be removed as soon
+  // as strings are supported and error can be properly implemented.
+  if (f->unmangled_name == "error")
+    return;
+
   // Create a new map for the function's local variables.
   locals_map *locals = new_locals(f->locals);
 
@@ -1493,6 +1740,10 @@ bpf_unparser::visit_functioncall (functioncall *e)
 static void
 print_format_add_tag(print_format *e)
 {
+  if (e->tag)
+    return;
+
+  e->tag = true;
   // surround the string with <MODNAME>...</MODNAME> to facilitate
   // stapbpf recovering it from debugfs.
   std::string start_tag = module_name;
@@ -1682,7 +1933,7 @@ build_internal_globals(globals& glob)
                       (&glob.internal_exit,
                        globals::map_slot(0, globals::EXIT)));
   glob.maps.push_back
-    ({ BPF_MAP_TYPE_ARRAY, 4, 8, globals::NUM_INTERNALS, 0 });
+    ({ BPF_MAP_TYPE_HASH, 4, 8, globals::NUM_INTERNALS, 0 });
 }
 
 static void
@@ -1963,6 +2214,40 @@ output_maps(BPF_Output &eo, globals &glob)
     }
 }
 
+void
+bpf_unparser::add_prologue()
+{
+  value *i0 = this_prog.new_imm(0);
+
+  // lookup exit global
+  value *frame = this_prog.lookup_reg(BPF_REG_10);
+  this_prog.mk_st(this_ins, BPF_W, frame, -4, i0);
+  this_prog.use_tmp_space(4);
+
+  this_prog.load_map(this_ins, this_prog.lookup_reg(BPF_REG_1), 0);
+  this_prog.mk_binary(this_ins, BPF_ADD, this_prog.lookup_reg(BPF_REG_2),
+                      frame, this_prog.new_imm(-4));
+  this_prog.mk_call(this_ins, BPF_FUNC_map_lookup_elem, 2);
+
+  value *r0 = this_prog.lookup_reg(BPF_REG_0);
+  block *cont_block = this_prog.new_block();
+  block *exit_block = get_exit_block();
+
+  // check that map_lookup_elem returned non-null ptr
+  this_prog.mk_jcond(this_ins, EQ, r0, i0, exit_block, cont_block);
+  set_block(cont_block);
+
+  // load exit status from ptr
+  value *exit_status = this_prog.new_reg();
+  this_prog.mk_ld(this_ins, BPF_DW, exit_status, r0, 0);
+
+  // if exit_status == 1 jump to exit, else continue with handler
+  cont_block = this_prog.new_block();
+  this_prog.mk_jcond(this_ins, EQ, exit_status, this_prog.new_imm(1),
+                     exit_block, cont_block);
+  set_block(cont_block);
+}
+
 static void
 translate_probe(program &prog, globals &glob, derived_probe *dp)
 {
@@ -1976,8 +2261,10 @@ translate_probe(program &prog, globals &glob, derived_probe *dp)
   // we don't implement that at the moment.  Nor is it easy to support
   // inserting a new start block that would enable retroactively saving
   // this only when needed.
-  u.this_in_arg0 = prog.new_reg();
+  u.this_in_arg0 = prog.lookup_reg(BPF_REG_6);
   prog.mk_mov(u.this_ins, u.this_in_arg0, prog.lookup_reg(BPF_REG_1));
+
+  u.add_prologue();
 
   dp->body->visit (&u);
   if (u.in_block())
@@ -2272,6 +2559,67 @@ translate_bpf_pass (systemtap_session& s)
           sort_for_bpf(s.generic_kprobe_derived_probes, kprobe_v);
 
           for (auto i = kprobe_v.begin(); i != kprobe_v.end(); ++i)
+            {
+              t = i->first->tok;
+              program p;
+              translate_probe(p, glob, i->first);
+              p.generate();
+              output_probe(eo, p, i->second, SHF_ALLOC);
+            }
+        }
+
+      if (s.perf_derived_probes)
+        {
+          sort_for_bpf_probe_arg_vector perf_v;
+          sort_for_bpf(s.perf_derived_probes, perf_v);
+
+          for (auto i = perf_v.begin(); i != perf_v.end(); ++i)
+            {
+              t = i->first->tok;
+              program p;
+              translate_probe(p, glob, i->first);
+              p.generate();
+              output_probe(eo, p, i->second, SHF_ALLOC);
+            }
+        }
+
+      if (s.hrtimer_derived_probes || s.timer_derived_probes)
+        {
+          sort_for_bpf_probe_arg_vector timer_v;
+          sort_for_bpf(s.hrtimer_derived_probes,
+                       s.timer_derived_probes, timer_v);
+
+          for (auto i = timer_v.begin(); i != timer_v.end(); ++i)
+            {
+              t = i->first->tok;
+              program p;
+              translate_probe(p, glob, i->first);
+              p.generate();
+              output_probe(eo, p, i->second, SHF_ALLOC);
+            }
+        }
+
+      if (s.tracepoint_derived_probes)
+        {
+          sort_for_bpf_probe_arg_vector trace_v;
+          sort_for_bpf(s.tracepoint_derived_probes, trace_v);
+
+          for (auto i = trace_v.begin(); i != trace_v.end(); ++i)
+            {
+              t = i->first->tok;
+              program p;
+              translate_probe(p, glob, i->first);
+              p.generate();
+              output_probe(eo, p, i->second, SHF_ALLOC);
+            }
+        }
+
+      if (s.uprobe_derived_probes)
+        {
+          sort_for_bpf_probe_arg_vector uprobe_v;
+          sort_for_bpf(s.uprobe_derived_probes, uprobe_v);
+
+          for (auto i = uprobe_v.begin(); i != uprobe_v.end(); ++i)
             {
               t = i->first->tok;
               program p;

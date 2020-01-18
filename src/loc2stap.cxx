@@ -17,6 +17,7 @@
 
 #include "loc2stap.h"
 #include "dwflpp.h"
+#include "tapsets.h"
 
 #if ! _ELFUTILS_PREREQ(0, 153)
 #define DW_OP_GNU_entry_value 0xf3
@@ -106,7 +107,9 @@ location_context::translate_address(Dwarf_Addr addr)
           c = "/* pragma:vma */ "
               "({ unsigned long addr = 0; "
               "addr = _stp_umodule_relocate (\""
-              + resolve_path(dw->module_name.c_str()) + "\", "
+              + path_remove_sysroot(dw->sess,
+				    resolve_path(dw->module_name.c_str()))
+	      + "\", "
               + lex_cast_hex (addr)
 	      + ", current); addr; })";
 	}
@@ -667,6 +670,10 @@ location_context::translate (const Dwarf_Op *expr, const size_t len,
 	    DIE ("unhandled DW_OP_GNU_entry_value");
 	    break;
 
+	  case DW_OP_GNU_parameter_ref:
+	    DIE ("unhandled DW_OP_GNU_parameter_ref");
+	    break;
+
 	  default:
 	    DIE ("unhandled DW_OP operation");
 	    break;
@@ -796,7 +803,7 @@ location_context::frame_location()
       // the DW_AT_frame_base attribute expression's value first.
       const Dwarf_Op *fb_ops;
       Dwarf_Op *fb_expr;
-      size_t fb_len;
+      size_t fb_len = 0;
 
       if (this->fb_attr == NULL)
 	{
@@ -1425,6 +1432,25 @@ array_stride (Dwarf_Die *typedie)
 			 + " " + dwarf_errmsg (-1));
 
   return pointer_stride (&die_mem);
+}
+
+void
+location_context::adapt_pointer_to_bpf(int size, int offset, bool is_signed)
+{
+  vardecl *old = this->pointer;
+  bpf_context_vardecl *v = new bpf_context_vardecl;
+
+  v->type = pe_long;
+  v->tok = old->tok;
+  v->name = old->name;
+  v->size = size;
+  v->offset = offset;
+  v->is_signed = is_signed;
+
+  this->pointer = v;
+
+  old->tok = NULL;
+  delete old;
 }
 
 /* Determine the maximum size of a base type, from some DIE in the CU.  */

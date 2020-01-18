@@ -1,5 +1,5 @@
 // systemtap compile-server web api server
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -9,10 +9,14 @@
 #include "api.h"
 #include "server.h"
 #include <iostream>
-#include <iomanip>
+#include <fstream>
 #include <sstream>
 #include "../util.h"
 #include "backends.h"
+#include "../cmdline.h"
+#include "utils.h"
+#include "../nsscommon.h"
+#include "../privilege.h"
 
 extern "C" {
 #include <unistd.h>
@@ -24,28 +28,24 @@ extern "C" {
 #include <errno.h>
 #include <glob.h>
 #include <sched.h>
-#include <uuid/uuid.h>
-#include <json-c/json_object.h>
+#include <limits.h>
 }
 
-static string get_uuid_representation(const uuid_t uuid)
+using namespace std;
+
+static server *httpd = NULL;
+
+struct result_file_info
 {
-    ostringstream os;
-
-    os << hex << setfill('0');
-    for (const unsigned char *ptr = uuid; ptr < uuid + sizeof(uuid_t); ptr++)
-        os << setw(2) << (unsigned int)*ptr;
-    return os.str();
-}
+    string path;
+    mode_t mode;
+};
 
 class resource
 {
 public:
     resource(string resource_base) {
-	uuid_t uuid;
-
-	uuid_generate(uuid);
-	uuid_str = get_uuid_representation(uuid);
+	uuid_str = get_uuid();
 	uri = resource_base + uuid_str;
     }
 
@@ -79,11 +79,9 @@ protected:
 class result_info : public resource
 {
 public:
-    result_info(int rc, string &out_path, string &err_path, string &mp,
-		mode_t mm)
+    result_info(int rc, string &out_path, string &err_path)
 	: resource("/results/"), rc(rc), stdout_path(out_path),
-	  stderr_path(err_path), module_path(mp), module_mode(mm),
-	  status_code(0)
+	  stderr_path(err_path), status_code(0)
     {
 	size_t found = stdout_path.find_last_of("/");
 	if (found != string::npos) {
@@ -93,10 +91,6 @@ public:
 	if (found != string::npos) {
 	    stderr_file = stderr_path.substr(found + 1);
 	}
-	found = module_path.find_last_of("/");
-	if (found != string::npos) {
-	    module_file = module_path.substr(found + 1);
-	}
     }
     result_info(unsigned int status_code, string content)
 	: resource("/results/"), rc(0), status_code(status_code),
@@ -104,8 +98,35 @@ public:
     {
     }
 
+    ~result_info()
+    {
+	if (!files.empty()) {
+	    for (auto it = files.begin(); it != files.end(); it++) {
+		delete it->second;
+	    }
+	    files.clear();
+	}
+    }
+
     void generate_response(response &r);
     void generate_file_response(response &r, string &f);
+
+    void add_file(string &path, mode_t mode)
+    {
+	size_t found = path.find_last_of("/");
+	string file_name;
+
+	if (found != string::npos) {
+	    file_name = path.substr(found + 1);
+	}
+	else {
+	    file_name = path;
+	}
+	struct result_file_info *rfi = new struct result_file_info;
+	rfi->path = path;
+	rfi->mode = mode;
+	files[file_name] = rfi;
+    }
 
 protected:
     int rc;
@@ -113,18 +134,18 @@ protected:
     string stdout_file;
     string stderr_path;
     string stderr_file;
-    string module_path;
-    string module_file;
-    mode_t module_mode;
+    map<string, struct result_file_info *> files;
 
     unsigned int status_code;
     string content;
 };
 
+static void result_infos_erase(result_info *r);
+
 class build_info : public resource
 {
 public:
-    build_info(struct client_request_data *crd)
+    build_info(client_request_data *crd)
 	: resource("/builds/"), crd(crd), builder_thread_running(false),
 	  result(NULL) { }
 
@@ -135,12 +156,15 @@ public:
 	    builder_thread_running = false;
 	}
 	if (result) {
+	    // If this build has an associated result, be sure to delete it
+	    // from the results list.
+	    result_infos_erase(result);
 	    delete result;
 	    result = NULL;
 	}
 	if (crd) {
 	    delete crd;
-	    crd = (struct client_request_data *)(void *)0xdeadbeef;
+	    crd = NULL;
 	}
     }
 
@@ -156,11 +180,12 @@ public:
     }
 
 private:
-    struct client_request_data *crd;
+    client_request_data *crd;
 
     bool builder_thread_running;
     pthread_t builder_tid;
 
+    void parse_cmd_args(void);
     static void *module_build_shim(void *arg);
     void *module_build();
     result_info *result;
@@ -203,11 +228,18 @@ void result_info::generate_response(response &r)
 	// Here we output any extra files, like a module. For each
 	// file print the location and mode (in decimal, since JSON
 	// doesn't do octal).
-	if (!module_file.empty()) {
-	    os << "," << endl << "  \"files\": [";
-	    os << endl << "    { \"location\": \""
-	       << uri + '/' + module_file
-	       << "\", \"mode\": " << module_mode << " }";
+	if (!files.empty()) {
+	    os << "," << endl << "  \"files\": [" << endl;
+	    bool first = true;
+	    for (auto it = files.begin(); it != files.end(); it++) {
+		if (!first)
+		    os << "," << endl;
+		else
+		    first = false;
+		os << "    { \"location\": \""
+		   << uri + '/' + it->first
+		   << "\", \"mode\": " << it->second->mode << " }";
+	    }
 	    os << endl << "  ]";
 	}
     }
@@ -219,7 +251,7 @@ void result_info::generate_file_response(response &r, string &file)
 {
     // We don't want to serve any old file (which would be a security
     // hole), only the files we told the user about.
-    clog << "Trying to retrieve file '" << file << "'" << endl;
+    server_error(_F("Trying to retrieve file '%s'", file.c_str()));
     string path;
     r.status_code = 200;
     {
@@ -233,18 +265,21 @@ void result_info::generate_file_response(response &r, string &file)
 	else if (!stderr_path.empty() && file == stderr_file) {
 	    path = stderr_path;
 	}
-	else if (!module_file.empty() && file == module_file) {
-	    path = module_path;
+	else if (!files.empty()) {
+	    auto it = files.find(file);
+	    if (it != files.end()) {
+		path = it->second->path;
+	    }
 	}
     }
 
     if (!path.empty()) {
-	cerr << "File requested:  " << file << endl;
-	cerr << "Served from   :  " << path << endl;
+	server_error(_F("File requested:  %s", file.c_str()));
+	server_error(_F("Served from   :  %s", path.c_str()));
 	r.file = path;
     }
     else {
-	cerr << "Couldn't find file" << endl;
+	server_error("Couldn't find file");
 	r = get_404_response();
     }
 }
@@ -302,7 +337,7 @@ void build_info::start_module_build()
 	lock_guard<mutex> lock(res_mutex);
 	if (builder_thread_running) {
 	    // This really shouldn't happen. Error out.
-	    cerr << "Mulitple attempts to build moulde." << endl;
+	    server_error("Mulitple attempts to build module.");
 	    return;
 	}
 	builder_thread_running = true;
@@ -310,7 +345,7 @@ void build_info::start_module_build()
 
     /* Create a thread to handle the module build. */
     if (pthread_create(&builder_tid, NULL, module_build_shim, this) < 0) {
-	cerr << "Failed to create thread: " << strerror(errno) << endl;
+	server_error(_F("Failed to create thread: %s", strerror(errno)));
 	exit(1);
     }
 }
@@ -321,6 +356,20 @@ vector<build_info *> build_infos;
 
 mutex results_mutex;
 vector<result_info *> result_infos;
+
+static void
+result_infos_erase(result_info *r)
+{
+    // Use a lock_guard to ensure the mutex gets released
+    // even if an exception is thrown.
+    lock_guard<mutex> lock(results_mutex);
+    for (auto it = result_infos.begin(); it != result_infos.end(); it++) {
+	if (r->get_uuid_str() == (*it)->get_uuid_str()) {
+	    result_infos.erase(it);
+	    break;
+	}
+    }
+}
 
 
 class build_collection_rh : public request_handler
@@ -333,16 +382,19 @@ public:
 
 response build_collection_rh::POST(const request &req)
 {
-    struct client_request_data *crd = new struct client_request_data;
+    client_request_data *crd = new struct client_request_data;
     if (crd == NULL) {
 	// Return an error.
-	clog << "500 - internal server error" << endl;
+	server_error("500 - internal server error");
 	response error500(500);
 	error500.content = "<h1>Internal server error, memory allocation failed.</h1>";
 	return error500;
     }
 
     // Gather up the info we need.
+    vector<string> file_name;
+    vector<string> build_id;
+    vector<string> file_pkg;
     for (auto it = req.params.begin(); it != req.params.end(); it++) {
 	if (it->first == "kver") {
 	    crd->kver = it->second[0];
@@ -354,20 +406,91 @@ response build_collection_rh::POST(const request &req)
 	    crd->cmd_args = it->second;
 	}
 	else if (it->first == "distro_name") {
+	    // Notice we're lowercasing the distro name to make things
+	    // simpler.
 	    crd->distro_name = it->second[0];
+	    transform(crd->distro_name.begin(), crd->distro_name.end(),
+		      crd->distro_name.begin(), ::tolower);
+
 	}
 	else if (it->first == "distro_version") {
 	    crd->distro_version = it->second[0];
 	}
+	else if (it->first == "build_id") {
+	    build_id = it->second;
+	}
+	else if (it->first == "file_name") {
+	    file_name = it->second;
+	}
+	else if (it->first == "file_pkg") {
+	    file_pkg = it->second;
+	}
+	else if (it->first == "env_vars") {
+	    // Get rid of a few standard environment variables (which
+	    // might cause us to do unintended things) from the list
+	    // the client sent us.
+	    for (auto it2 = it->second.begin(); it2 != it->second.end();
+		 it2++) {
+		if (*it2 == "IFS" || *it2 == "CDPATH" || *it2 == "ENV"
+		    || *it2 == "BASH_ENV") {
+		    server_error(_F("ignoring client environment variable: %s",
+				    (*it2).c_str()));
+		}
+		else {
+		    crd->env_vars.push_back(*it2);
+		}
+	    }
+	}
 	// Notice we silently ignore any "extra" parameters.
     }
+
+    // Combine the file info fields.
+    if (! file_name.empty() || ! build_id.empty() || ! file_pkg.empty()) {
+	if (file_name.size() != build_id.size()
+	    || file_name.size() != file_pkg.size()) {
+	    // Return an error.
+	    server_error("400 - bad request (1)");
+	    response error400(400);
+	    error400.content = "<h1>Bad request</h1>";
+	    return error400;
+	}
+	for (unsigned i = 0; i < file_name.size(); ++i) {
+	    auto finfo = make_shared<struct file_info>();
+	    finfo->name = file_name[i];
+	    finfo->pkg = file_pkg[i];
+	    finfo->build_id = build_id[i];
+	    crd->file_info.push_back(finfo);
+	}
+    }
+
+    // We've got 2 directories that we use:
+    //   server_dir: the directory for "server" files - stuff received
+    //               from the client, files generated on the server
+    //               (like stdout/stderr files)
+    //   client_dir: directory for "client" files, file to be operated
+    //               on (or generated by) by systemtap itself
+    // We need to create the client_dir.
+    crd->server_dir = req.base_dir;
+    char tmpdir_template[PATH_MAX];
+    snprintf(tmpdir_template, PATH_MAX, "%s/stap-client.XXXXXX",
+	     getenv("TMPDIR") ?: "/tmp");
+    char *tmpdir_ptr = mkdtemp(tmpdir_template);
+    if (tmpdir_ptr == NULL) {
+	// Return an error.
+	server_error(_F("mkdtemp failed: %s", strerror(errno)));
+	response error500(500);
+	error500.content = "<h1>Internal server error, mkdtemp failed.</h1>";
+	return error500;
+    }
+    crd->client_dir = tmpdir_ptr;
+
     if (! req.files.empty()) {
-	clog << "Files received:" << endl;
-	crd->base_dir = req.base_dir;
+	server_error("Files received:");
 	for (auto i = req.files.begin(); i != req.files.end(); i++) {
 	    for (auto j = i->second.begin(); j != i->second.end();
 		 j++) {
-		clog << *j << endl;
+		server_error(*j);
+		crd->files.push_back(*j);
 	    }
 	}
     }
@@ -376,7 +499,7 @@ response build_collection_rh::POST(const request &req)
     if (crd->kver.empty() || crd->arch.empty() || crd->cmd_args.empty()
 	|| crd->distro_name.empty() || crd->distro_version.empty()) {
 	// Return an error.
-	clog << "400 - bad request" << endl;
+	server_error("400 - bad request (2)");
 	response error400(400);
 	error400.content = "<h1>Bad request</h1>";
 	return error400;
@@ -395,7 +518,7 @@ response build_collection_rh::POST(const request &req)
     b->start_module_build();
 
     // Return a 202 response.
-    clog << "Returning a 202" << endl;
+    server_error("Returning a 202");
     response resp(202);
     resp.headers["Location"] = b->get_uri();
     resp.headers["Retry-After"] = "10";
@@ -408,11 +531,12 @@ public:
     individual_build_rh(string n) : request_handler(n) {}
 
     response GET(const request &req);
+    response DELETE(const request &req);
 };
 
 response individual_build_rh::GET(const request &req)
 {
-    clog << "individual_build_rh::GET" << endl;
+    server_error("individual_build_rh::GET");
 
     // matches[0] is the entire string '/builds/XXXX'. matches[1] is
     // just the buildid 'XXXX'.
@@ -431,12 +555,43 @@ response individual_build_rh::GET(const request &req)
     }
 
     if (b == NULL) {
-	clog << "Couldn't find build '" << buildid << "'" << endl;
+	server_error(_F("Couldn't find build '%s'", buildid.c_str()));
 	return get_404_response();
     }
 
     response rsp(0);
     b->generate_response(rsp);
+    return rsp;
+}
+
+response individual_build_rh::DELETE(const request &req)
+{
+    // matches[0] is the entire string '/builds/XXXX'. matches[1] is
+    // just the buildid 'XXXX'.
+    string buildid = req.matches[1];
+    build_info *b = NULL;
+    {
+	// Use a lock_guard to ensure the mutex gets released even if an
+	// exception is thrown.
+	lock_guard<mutex> lock(builds_mutex);
+	for (auto it = build_infos.begin(); it != build_infos.end(); it++) {
+	    if (buildid == (*it)->get_uuid_str()) {
+		b = *it;
+		build_infos.erase(it);
+		break;
+	    }
+	}
+    }
+
+    if (b == NULL) {
+	server_error(_F("Couldn't find build '%s'", buildid.c_str()));
+	return get_404_response();
+    }
+
+    // At this point we've found a matching build. Delete it.
+    delete b;
+    response rsp(300);
+    rsp.content = "";
     return rsp;
 }
 
@@ -450,7 +605,7 @@ public:
 
 response individual_result_rh::GET(const request &req)
 {
-    clog << "individual_result_rh::GET" << endl;
+    server_error("individual_result_rh::GET");
 
     // matches[0] is the entire string '/results/XXXX'. matches[1] is
     // just the id_str 'XXXX'.
@@ -469,7 +624,7 @@ response individual_result_rh::GET(const request &req)
     }
 
     if (ri == NULL) {
-	clog << "Couldn't find result id '" << id_str << "'" << endl;
+	server_error(_F("Couldn't find result id '%s'", id_str.c_str()));
 	return get_404_response();
     }
 
@@ -488,7 +643,7 @@ public:
 
 response result_file_rh::GET(const request &req)
 {
-    clog << "result_file_rh::GET" << endl;
+    server_error("result_file_rh::GET");
 
     // matches[0] is the entire string
     // '/results/XXXX/FILE'. matches[1] is the result uuid string
@@ -509,7 +664,7 @@ response result_file_rh::GET(const request &req)
     }
 
     if (ri == NULL) {
-	clog << "Couldn't find result id '" << id_str << "'" << endl;
+	server_error(_F("Couldn't find result id '%s'", id_str.c_str()));
 	return get_404_response();
     }
 
@@ -548,12 +703,109 @@ build_info::module_build_shim(void *arg)
     return bi->module_build();
 }
 
+void
+build_info::parse_cmd_args(void)
+{
+    // Here we parse the stap command line for anything
+    // interesting. Note that we're not parsing the httpd command
+    // line, but the stap command line the user entered on the client
+    // side.
+    //
+    // Also note that we need not do any options consistency checking
+    // since our spawned stap instance will do that.
+
+    // Create an argv/argc for use by getopt_long. Note that we have
+    // to add an argument 0 (for the 'stap' command itself) to make
+    // getopt_long() happy.
+    unsigned argc = crd->cmd_args.size() + 1;
+    char **argv = new char *[argc + 1];
+    char arg0[] = "stap";
+    argv[0] = arg0;
+    for (unsigned i = 0; i < crd->cmd_args.size(); ++i) {
+	argv[i + 1] = (char *)crd->cmd_args[i].c_str();
+    }
+    argv[argc] = NULL;
+
+    optind = 1;
+    unsigned perpass_verbose[5] = { 0 };
+    unsigned verbose = 0;
+    privilege_t privilege = pr_highest; // Until specified otherwise.
+    while (true) {
+	int grc = getopt_long(argc, argv, STAP_SHORT_OPTIONS,
+			      stap_long_options, NULL);
+	if (grc < 0)
+	    break;
+	switch (grc) {
+        case 'v':
+	    for (unsigned i = 0; i < 5; i++)
+		perpass_verbose[i]++;
+	    verbose++;
+	    break;
+	case LONG_OPT_VERBOSE_PASS:
+            assert(optarg);
+	    if (strlen(optarg) > 0 && strlen(optarg) <= 5) {
+		for (unsigned i = 0; i < strlen(optarg); i++) {
+		    if (isdigit(optarg[i]))
+			perpass_verbose[i] += (optarg[i] - '0');
+		}
+	    }
+	    break;
+	case LONG_OPT_PRIVILEGE:
+	    if (strcmp(optarg, "stapdev") == 0)
+		privilege = pr_stapdev;
+	    else if (strcmp(optarg, "stapsys") == 0)
+		privilege = pr_stapsys;
+	    else if (strcmp(optarg, "stapusr") == 0)
+		privilege = pr_stapusr;
+	    else {
+		// FIXME: what to do here?
+		server_error(_F("Invalid argument '%s' for --privilege",
+				optarg));
+		privilege = pr_highest;
+	    }
+	    break;
+	case LONG_OPT_UNPRIVILEGED:
+	    privilege = pr_unprivileged;
+	    break;
+	default:
+	    // We silently ignore all options we aren't interested in.
+	    break;
+	}
+    }
+    delete[] argv;
+
+    // Now that we've finished parsing the arguments, we'll take the
+    // pass 2 verbose level as the level of verbosity to report things
+    // back to the client.
+    crd->verbose = perpass_verbose[1];
+    server_error(_F("Verbose level: %d", crd->verbose));
+    crd->privilege = privilege;
+    server_error(_F("Privilege: %d", crd->privilege));
+}
+
 void *
 build_info::module_build()
 {
     vector<string> argv;
-    char tmp_dir_template[] = "/tmp/stap-httpd.XXXXXX";
-    char *tmp_dir;
+
+    // The client can optionally send over a "client.zip" file, which
+    // we automatically unzip here.
+    for (auto i = crd->files.begin(); i != crd->files.end(); i++) {
+	if (*i == "client.zip") {
+	    string zip_path = crd->server_dir + "/client.zip";
+	    vector<string> zip_argv = { "unzip", "-q", "-d", crd->client_dir,
+					zip_path };
+	    int rc = stap_system (2, zip_argv);
+	    if (rc != 0) {
+		// Return an error.
+		server_error(_F("unzip failed: %d", rc));
+		result_info *ri = new result_info(400,
+						  "<h1>Bad request</h1>");
+		set_result(ri);
+		return NULL;
+	    }
+	}
+    }
 
     // Process the command arguments.
     argv.push_back("stap");
@@ -562,18 +814,8 @@ build_info::module_build()
     argv.push_back("-r");
     argv.push_back(crd->kver);
 
-    // Create a temporary directory for stap to use.
-    tmp_dir = mkdtemp(tmp_dir_template);
-    if (tmp_dir == NULL) {
-	// Return an error.
-	clog << "mkdtemp failed: " << strerror(errno) << endl;
-	result_info *ri = new result_info(500,
-					  "<h1>Internal server error, mkdtemp failed.</h1>");
-	set_result(ri);
-	return NULL;
-    }
-    string tmpdir_opt = string("--tmpdir=") + tmp_dir;
-    argv.push_back(tmpdir_opt);
+    // Make sure stap knows where to put the results.
+    argv.push_back(string("--tmpdir=") + crd->client_dir);
 
     // Add the "client options" argument, which tells stap to do some
     // extra command line validation and to stop at pass 4.
@@ -584,35 +826,43 @@ build_info::module_build()
 	argv.push_back(*it);
     }
 
-    // If we've got a base_dir, we need to do a chdir() to that
-    // directory. However, all threads in a process share the same
-    // root directory and working directory. If we just do a chdir()
-    // here and then call spawn, it is possible that a different
-    // thread is also here and does a chdir() right after ours but
-    // before the spawn. So, instead we'll call unshare() first to
-    // "unshare" the thread's working directory. Then when we do a
-    // chdir(), it won't affect the other threads working directory.
-    if (!crd->base_dir.empty()) {
-	if (unshare(CLONE_FS) < 0) {
-	    // Return an error.
-	    clog << "Error in unshare: " << strerror(errno) << endl;
-	    result_info *ri = new result_info(500,
-					      "<h1>Internal server error, unshare failed.</h1>");
-	    set_result(ri);
-	    return NULL;
-	}
-	if (chdir(crd->base_dir.c_str()) < 0) {
-	    // Return an error.
-	    clog << "Error in chdir: " << strerror(errno) << endl;
-	    result_info *ri = new result_info(500,
-					      "<h1>Internal server error, chdir failed.</h1>");
-	    set_result(ri);
-	    return NULL;
-	}
+    // We need to do a chdir() to the client directory. However, all
+    // threads in a process share the same root directory and working
+    // directory. If we just do a chdir() here and then call spawn, it
+    // is possible that a different thread is also here and does a
+    // chdir() right after ours but before the spawn. So, instead
+    // we'll call unshare() first to "unshare" the thread's working
+    // directory. Then when we do a chdir(), it won't affect the other
+    // threads working directory.
+    if (unshare(CLONE_FS) < 0) {
+	// Return an error.
+	server_error(_F("Error in unshare: %s", strerror(errno)));
+	result_info *ri = new result_info(500,
+					  "<h1>Internal server error, unshare failed.</h1>");
+	set_result(ri);
+	return NULL;
+    }
+    if (chdir(crd->client_dir.c_str()) < 0) {
+	// Return an error.
+	server_error(_F("Error in chdir: %s", strerror(errno)));
+	result_info *ri = new result_info(500,
+					  "<h1>Internal server error, chdir failed.</h1>");
+	set_result(ri);
+	return NULL;
     }
 
-    string stdout_path = string(tmp_dir) + "/stdout";
-    string stderr_path = string(tmp_dir) + "/stderr";
+    // Parse the client's command args.
+    parse_cmd_args();
+
+    // Create empty stdout/stderr files, so they always exist.
+    string stdout_path = crd->server_dir + "/stdout";
+    ofstream file;
+    file.open(stdout_path, ios::out);
+    file.close();
+    string stderr_path = crd->server_dir + "/stderr";
+    file.open(stderr_path, ios::out);
+    file.close();
+
     int staprc = -1;
     vector<backend_base *> backends;
     get_backends(backends);
@@ -620,7 +870,8 @@ build_info::module_build()
     for (auto it = backends.begin(); it != backends.end(); it++) {
 	if ((*it)->can_generate_module(crd)) {
 	    backend_found = true;
-	    staprc = (*it)->generate_module(crd, argv, tmp_dir, stdout_path, stderr_path);
+	    staprc = (*it)->generate_module(crd, argv, get_uuid_str(),
+					    stdout_path, stderr_path);
 	    break;
 	}
     }
@@ -628,7 +879,8 @@ build_info::module_build()
     // If none of the backends can handle the request, send an error.
     if (!backend_found) {
 	// Return an error.
-	clog << "No backends can satisfy this request " << endl;
+	server_error("Error: No backends can satisfy this request,"
+		     " returning a 501.");
 	result_info *ri = new result_info(501, "<h1>Not implemented.</h1>");
 	set_result(ri);
 	return NULL;
@@ -637,17 +889,20 @@ build_info::module_build()
     // See if we built a module.
     string module_path;
     mode_t module_mode = 0;
+    string module_sign_path;
     if (staprc == 0) {
 	glob_t globber;
-	string pattern = string(tmp_dir) + "/*.ko";
+	string pattern = crd->client_dir + "/*.ko";
 	int rc = glob(pattern.c_str(), GLOB_ERR, NULL, &globber);
 	if (rc) {
-	    clog << "Unable to find a module in " << tmp_dir << endl;
+	    server_error(_F("Unable to find a module in %s",
+			    crd->client_dir.c_str()));
 	}
 	else {
 	    if (globber.gl_pathc != 1) {
-		clog << "Too many modules (" << globber.gl_pathc << ") in "
-		     << tmp_dir << endl;
+		server_error(_F("Too many modules (%ld) in %s",
+				(long)globber.gl_pathc,
+				crd->client_dir.c_str()));
 	    }
 	    else {
 		module_path = globber.gl_pathv[0];
@@ -663,12 +918,116 @@ build_info::module_build()
 	    }
 	    globfree(&globber);
 	}
+
+	// If we've got a module, it might need signing.
+	if (! module_path.empty()
+	    && (pr_contains(crd->privilege, pr_stapusr)
+		|| pr_contains(crd->privilege, pr_stapsys))) {
+	    server_error("Signing file...");
+	    module_sign_path = module_path + ".sgn";
+	    sign_file(httpd->get_cert_db_path(), server_cert_nickname(),
+		      module_path, module_sign_path);
+	}
     }
 
-    result_info *ri = new result_info(staprc, stdout_path, stderr_path,
-				      module_path, module_mode);
+    result_info *ri = new result_info(staprc, stdout_path, stderr_path);
+    if (! module_path.empty()) {
+	ri->add_file(module_path, module_mode);
+	if (! module_sign_path.empty()) {
+	    // We've got a module signature. Also figure out the file
+	    // mode by calling stat().
+	    struct stat stbuf;
+	    mode_t mode = 0;
+	    if (stat(module_sign_path.c_str(), &stbuf) == 0) {
+		mode = stbuf.st_mode & 07777;
+	    }
+	    else {
+		module_sign_path.clear();
+	    }
+	    if (! module_sign_path.empty()) {
+		ri->add_file(module_sign_path, mode);
+	    }
+	}
+    }
     set_result(ri);
     return NULL;
+}
+
+client_request_data::~client_request_data()
+{
+    if (!server_dir.empty()) {
+	// Remove the temporary directory.
+	vector<string> cleanupcmd { "rm", "-rf", server_dir };
+	int rc = stap_system(0, cleanupcmd);
+	if (rc != 0)
+	    server_error (_("Error in tmpdir cleanup"));
+	if (verbose > 1)
+	    server_error(_F("Removed temporary directory \"%s\"",
+			    server_dir.c_str()));
+	server_dir.clear();
+    }
+    if (!client_dir.empty()) {
+	// Remove the temporary directory.
+	vector<string> cleanupcmd { "rm", "-rf", client_dir };
+	int rc = stap_system(0, cleanupcmd);
+	if (rc != 0)
+	    server_error (_("Error in tmpdir cleanup"));
+	if (verbose > 1)
+	    server_error(_F("Removed temporary directory \"%s\"",
+			    client_dir.c_str()));
+	client_dir.clear();
+    }
+}
+
+// Return a json representation of the client_request_data. The caller
+// is responsible for calling json_object_put() on the returned object.
+struct json_object *
+client_request_data::get_json_object() const
+{
+    // To make sure we have all the latest changes, we always make a
+    // "fresh" json object.
+    struct json_object *root = json_object_new_object();
+
+    struct json_object *item = json_object_new_string(kver.c_str());
+    json_object_object_add(root, "kver", item);
+    item = json_object_new_string(arch.c_str());
+    json_object_object_add(root, "arch", item);
+    item = json_object_new_string(server_dir.c_str());
+    json_object_object_add(root, "server_dir", item);
+    item = json_object_new_string(client_dir.c_str());
+    json_object_object_add(root, "client_dir", item);
+    item = json_object_new_string(distro_name.c_str());
+    json_object_object_add(root, "distro_name", item);
+    item = json_object_new_string(distro_version.c_str());
+    json_object_object_add(root, "distro_version", item);
+
+    struct json_object *array = json_object_new_array();
+    for (auto it = cmd_args.begin(); it != cmd_args.end(); ++it) {
+	item = json_object_new_string((*it).c_str());
+	json_object_array_add(array, item);
+    }
+    json_object_object_add(root, "cmd_args", array);
+    
+    array = json_object_new_array();
+    for (auto it = files.begin(); it != files.end(); ++it) {
+	item = json_object_new_string((*it).c_str());
+	json_object_array_add(array, item);
+    }
+    json_object_object_add(root, "files", array);
+
+    array = json_object_new_array();
+    for (auto it = file_info.begin(); it != file_info.end(); ++it) {
+	struct json_object *name = json_object_new_string((*it)->name.c_str());
+	struct json_object *pkg = json_object_new_string((*it)->pkg.c_str());
+	struct json_object *build_id = json_object_new_string((*it)->build_id.c_str());
+	item = json_object_new_object();
+	json_object_object_add(item, "name", name);
+	json_object_object_add(item, "pkg", pkg);
+	json_object_object_add(item, "build_id", build_id);
+	json_object_array_add(array, item);
+    }
+    json_object_object_add(root, "file_info", array);
+    return root;
 }
 
 void api_cleanup()
@@ -681,13 +1040,18 @@ void api_cleanup()
 	for (size_t idx = 0; idx < build_infos.size(); idx++) {
 	    delete build_infos[idx];
 	}
+	build_infos.clear();
     }
 }
 
-void api_add_request_handlers(server &httpd)
+void api_add_request_handlers(server &http)
 {
-    httpd.add_request_handler("/builds$", builds_rh);
-    httpd.add_request_handler("/builds/([0-9a-f]+)$", build_rh);
-    httpd.add_request_handler("/results/([0-9a-f]+)$", result_rh);
-    httpd.add_request_handler("/results/([^/]+)/([^/]+)$", result_file_rh);
+    // Remember the server.
+    httpd = &http;
+    
+    // Add the request handlers.
+    http.add_request_handler("/builds$", builds_rh);
+    http.add_request_handler("/builds/([0-9a-f]+)$", build_rh);
+    http.add_request_handler("/results/([0-9a-f]+)$", result_rh);
+    http.add_request_handler("/results/([^/]+)/([^/]+)$", result_file_rh);
 }

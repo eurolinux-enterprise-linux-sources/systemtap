@@ -1,5 +1,5 @@
 // systemtap compile-server web api server
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -9,12 +9,17 @@
 #include "server.h"
 #include "api.h"
 #include <iostream>
+#include "../util.h"
+#include "nss_funcs.h"
+#include "utils.h"
+#include "../nsscommon.h"
 
 extern "C" {
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
 #include <sys/signalfd.h>
+#include <getopt.h>
 }
 
 server *httpd = NULL;
@@ -30,7 +35,7 @@ signal_thread(void *arg)
 
 	s = read(signal_fd, &si, sizeof(si));
 	if (s != sizeof(si)) {
-	    cerr << "signal fd read error: "<< strerror(errno) << endl;
+	    server_error(_F("signal fd read error: %s", strerror(errno)));
 	    continue;
 	}
 
@@ -50,7 +55,7 @@ signal_thread(void *arg)
 	    // waitpid() to work properly.
 	}
 	else {
-	    cerr << "Got unhandled signal " << si.ssi_signo << endl;
+	    server_error(_F("Got unhandled signal %d", si.ssi_signo));
 	}
     }
     close(signal_fd);
@@ -76,27 +81,97 @@ setup_main_signals(pthread_t *tid)
      * signals. */
     int signal_fd = signalfd(-1, &s, SFD_CLOEXEC);
     if (signal_fd < 0) {
-	cerr << "Failed to create signal file descriptor: "
-	     << strerror(errno) << endl;
+	server_error(_F("Failed to create signal file descriptor: %s",
+			strerror(errno)));
 	exit(1);
     }
 
     /* Let the special signal thread handle signals. */
     if (pthread_create(tid, NULL, signal_thread, (void *)(long)signal_fd) < 0) {
-	cerr << "Failed to create thread: " << strerror(errno) << endl;
+	server_error(_F("Failed to create thread: %s", strerror(errno)));
 	exit(1);
     }
 }
 
+// FIXME: the default port of 1234 was just chosen at random. A better
+// port default needs to be chosen.
+static uint16_t port = 1234;
+static string cert_db_path;
+
+void
+parse_cmdline(int argc, char *const argv[])
+{
+    enum {
+	LONG_OPT_PORT = 256,
+	LONG_OPT_SSL,
+	LONG_OPT_LOG,
+    };
+    static struct option long_options[] = {
+        { "port", 1, NULL, LONG_OPT_PORT },
+        { "ssl", 1, NULL, LONG_OPT_SSL },
+        { "log", 1, NULL, LONG_OPT_LOG },
+        { NULL, 0, NULL, 0 }
+    };
+    while (true) {
+	int grc = getopt_long(argc, argv, "", long_options, NULL);
+	char *num_endptr;
+	unsigned long port_tmp;
+	if (grc < 0)
+	    break;
+	switch (grc) {
+	  case LONG_OPT_PORT:
+	    errno = 0;
+	    port_tmp = strtoul(optarg, &num_endptr, 10);
+	    if (*num_endptr != '\0') {
+		server_error(_F("%s: cannot parse number '--port=%s'", argv[0],
+				optarg));
+		exit(1);
+	    }
+	    if (errno != 0 || port_tmp > 65535) {
+		server_error(_F("%s: invalid entry: port must be between"
+				" 0 and 65535 '--port=%s'", argv[0], optarg));
+		exit(1);
+	    }
+	    port = (uint16_t)port_tmp;
+	    break;
+	  case LONG_OPT_SSL:
+	    cert_db_path = optarg;
+	    break;
+	  case LONG_OPT_LOG:
+	    start_log(optarg, true);
+	    break;
+	  default:
+	    break;
+	}
+    }
+    for (int i = optind; i < argc; i++) {
+	server_error(_F("%s: unrecognized argument '%s'", argv[0], argv[i]));
+    }
+}
+
 int
-main(int /*argc*/, char *const /*argv*/[])
+main(int argc, char *const argv[])
 {
     pthread_t tid;
 
+    // Get rid of a few standard environment variables (which might
+    // cause us to do unintended things).
+    if (unsetenv("IFS") || unsetenv("CDPATH") || unsetenv("ENV")
+	|| unsetenv("BASH_ENV")) {
+	server_error(_F("unsetenv failed: %s", strerror(errno)));
+	return 1;
+    }
+
     setup_main_signals(&tid);
 
+    parse_cmdline(argc, argv);
+
+    // Initialize NSS.
+    if (nss_init(cert_db_path) != 0)
+	return 1;
+
     // Create the server and ask the api to register its handlers.
-    httpd = new server(1234);
+    httpd = new server(port, cert_db_path);
     api_add_request_handlers(*httpd);
 
     // Wait for the server to shut itself down.
@@ -108,5 +183,10 @@ main(int /*argc*/, char *const /*argv*/[])
 
     // Ask the api to do its cleanup.
     api_cleanup();
+
+    // Shutdown NSS.
+    nss_shutdown(cert_db_path);
+
+    end_log();
     return 0;
 }

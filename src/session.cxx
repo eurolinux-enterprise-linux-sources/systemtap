@@ -180,6 +180,7 @@ systemtap_session::systemtap_session ():
   color_errors = isatty(STDERR_FILENO) // conditions for coloring when
     && strcmp(getenv("TERM") ?: "notdumb", "dumb"); // on auto
   interactive_mode = false;
+  run_example = false;
   pass_1a_complete = false;
   timeout = 0;
 
@@ -365,6 +366,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   color_errors = other.color_errors;
   color_mode = other.color_mode;
   interactive_mode = other.interactive_mode;
+  run_example = other.run_example;
   pass_1a_complete = other.pass_1a_complete;
   timeout = other.timeout;
 
@@ -383,6 +385,7 @@ systemtap_session::systemtap_session (const systemtap_session& other,
   script_file = other.script_file;
   cmdline_script = other.cmdline_script;
   additional_scripts = other.additional_scripts;
+  stdin_script.str() = other.stdin_script.str();
   c_macros = other.c_macros;
   args = other.args;
   kbuildflags = other.kbuildflags;
@@ -479,12 +482,11 @@ systemtap_session::version_string ()
 void
 systemtap_session::version ()
 {
-  // PRERELEASE
   cout << _F("Systemtap translator/driver (version %s)\n"
-             "Copyright (C) 2005-2017 Red Hat, Inc. and others\n"
+             "Copyright (C) 2005-2018 Red Hat, Inc. and others\n"   // PRERELEASE
              "This is free software; see the source for copying conditions.\n",
              version_string().c_str());
-  cout << _F("tested kernel versions: %s ... %s\n", "2.6.18", "4.11");
+  cout << _F("tested kernel versions: %s ... %s\n", "2.6.18", "4.18-rc0");   // PRERELEASE
   
   cout << _("enabled features:")
 #ifdef HAVE_AVAHI
@@ -495,6 +497,9 @@ systemtap_session::version ()
 #endif
 #ifdef HAVE_DYNINST
        << " DYNINST"
+#endif
+#ifdef HAVE_BPF_DECLS
+       << " BPF"
 #endif
 #ifdef HAVE_JAVA
        << " JAVA"
@@ -643,6 +648,10 @@ systemtap_session::usage (int exitcode)
     "   --dyninst\n"
     "              shorthand for --runtime=dyninst\n"
 #endif /* HAVE_DYNINST */
+#ifdef HAVE_BPF_DECLS
+    "   --bpf\n"
+    "              shorthand for --runtime=bpf\n"
+#endif /* HAVE_BPF_DECLS */
     "   --prologue-searching[=WHEN]\n"
     "              prologue-searching for function probes\n"
     "   --privilege=PRIVILEGE_LEVEL\n"
@@ -722,6 +731,9 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
   client_options_disallowed_for_unprivileged = "";
   std::set<std::string> additional_unwindsym_modules;
   struct rlimit our_rlimit;
+  bool sysroot_option_seen = false;
+  string kernel_release_value;
+
   while (true)
     {
       char * num_endptr;
@@ -887,7 +899,7 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 	    // Note that '-' must come last in a regex bracket expression.
             assert_regexp_match("-r parameter from client", optarg, "^[a-z0-9_.+-]+$");
 	  server_args.push_back (string ("-") + (char)grc + optarg);
-          setup_kernel_release(optarg);
+	  kernel_release_value = optarg;
           break;
 
         case 'a':
@@ -1228,6 +1240,10 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 	  usage (0);
 	  break;
 
+	case LONG_OPT_RUN_EXAMPLE:
+	  run_example = true;
+	  break;
+
 	  // The caching options should not be available to server clients
 	case LONG_OPT_DISABLE_CACHE:
 	  if (client_options) {
@@ -1473,7 +1489,7 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 	  if (client_options) {
 	      cerr << _F("ERROR: %s invalid with %s", "--sysroot", "--client-options") << endl;
 	      return 1;
-	  } else if (!sysroot.empty()) {
+	  } else if (sysroot_option_seen) {
 	      cerr << "ERROR: multiple --sysroot options not supported" << endl;
 	      return 1;
 	  } else {
@@ -1487,11 +1503,17 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 
 	      sysroot = string(spath);
 	      free (spath);
-	      if (sysroot[sysroot.size() - 1] != '/')
-		  sysroot.append("/");
 
-	      break;
+	      // We do path creation like this:
+	      //   sysroot + "/lib/modules"
+	      // So, we don't want the sysroot path to end with a '/',
+	      // otherwise we'll end up with '/foo//lib/modules'.
+	      if (!sysroot.empty() && *(sysroot.end() - 1) == '/') {
+		  sysroot.erase(sysroot.end() - 1);
+	      }
 	  }
+	  sysroot_option_seen = true;
+	  break;
 
 	case LONG_OPT_SYSENV:
 	  if (client_options) {
@@ -1501,7 +1523,7 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 	      string sysenv_str = optarg;
 	      string value;
 	      size_t pos;
-	      if (sysroot.empty()) {
+	      if (! sysroot_option_seen) {
 		  cerr << "ERROR: --sysenv must follow --sysroot" << endl;
 		  return 1;
 	      }
@@ -1539,6 +1561,11 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 
 	case LONG_OPT_RUNTIME_DYNINST:
           if (!parse_cmdline_runtime ("dyninst"))
+            return 1;
+          break;
+
+	case LONG_OPT_RUNTIME_BPF:
+          if (!parse_cmdline_runtime ("bpf"))
             return 1;
           break;
 
@@ -1646,6 +1673,15 @@ systemtap_session::parse_cmdline (int argc, char * const argv [])
 	}
     }
 
+  if (! kernel_release_value.empty())
+  {
+      setup_kernel_release(kernel_release_value);
+  }
+  else if (! sysroot.empty())
+  {
+      kernel_build_tree = sysroot + "/lib/modules/" + kernel_release  + "/build";
+  }
+
   return 0;
 }
 
@@ -1656,8 +1692,14 @@ systemtap_session::parse_cmdline_runtime (const string& opt_runtime)
     runtime_mode = kernel_runtime;
   else if (opt_runtime == string("bpf"))
     {
+#ifndef HAVE_BPF_DECLS
+      cerr << _("ERROR: --runtime=bpf unavailable; this build lacks BPF feature") << endl;
+      version();
+      return false;
+#else
       runtime_mode = bpf_runtime;
       use_cache = use_script_cache = false;
+#endif
     }
   else if (opt_runtime == string("dyninst"))
     {
@@ -1935,6 +1977,11 @@ systemtap_session::parse_kernel_config ()
         clog << _F("Checking \"%s\" failed with error: %s",
                    kernel_config_file.c_str(), strerror(errno)) << endl;
 	find_devel_rpms(*this, kernel_build_tree.c_str());
+        // Enable warnings, so that the rpm-installation help is sent
+        // out.  The above message is going to go to stderr anyway
+        // in the case of stap -L without a necessary -devel available.
+        // Might as well make the text more helpful.
+        this->suppress_warnings = false;
 	missing_rpm_list_print(*this, "-devel");
 	return rc;
     }
@@ -2013,7 +2060,7 @@ systemtap_session::parse_kernel_functions ()
 	clog << _F("Kernel symbol table %s unavailable, (%s)",
 		   system_map_path.c_str(), strerror(errno)) << endl;
 
-      system_map_path = "/boot/System.map-" + kernel_release;
+      system_map_path = sysroot + "/boot/System.map-" + kernel_release;
       system_map.clear();
       system_map.open(system_map_path.c_str(), ifstream::in);
       if (! system_map.is_open())
@@ -2152,7 +2199,7 @@ void systemtap_session::insert_loaded_modules()
 }
 
 void
-systemtap_session::setup_kernel_release (const char* kstr) 
+systemtap_session::setup_kernel_release (const string& kstr) 
 {
   // Sometimes we may get dupes here... e.g. a server may have a full
   // -r /path/to/kernel followed by a client's -r kernel.
@@ -2183,7 +2230,7 @@ systemtap_session::setup_kernel_release (const char* kstr)
   else
     {
       update_release_sysroot = true;
-      kernel_release = string (kstr);
+      kernel_release = kstr;
       if (!kernel_release.empty())
         kernel_build_tree = "/lib/modules/" + kernel_release + "/build";
 

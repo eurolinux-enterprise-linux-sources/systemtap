@@ -134,7 +134,7 @@ class _PypProvider(_HeaderCreator):
         varname_spec = varname + Optional("[" + array_size + "]")
         struct_decl = Group(oneOf("struct union") + varname + Suppress(nestedExpr('{','}')) + semi)
         enum_decl = Group("enum" + varname + Suppress(nestedExpr('{','}')) + semi)
-        member_decl = Group((Optional(oneOf("struct unsigned const")) + type_name)
+        member_decl = Group((Optional(oneOf("struct unsigned const")) + type_name + Optional(Keyword("const")))
                             + Optional(Word("*"), default="") + Optional(varname_spec))
         struct_typedef = Group(Literal("typedef") + Literal("struct") + varname
                                + Suppress(nestedExpr('{','}'))) + Optional(varname) + semi
@@ -410,8 +410,12 @@ def main():
         else:
             print("header: " + fname)
 
-        fname = filename + ".dtrace-temp.c"
-        fdesc = open(fname, mode='w')
+        try: # for reproducible-builds purposes, prefer a fixed path name pattern
+            fname = filename + ".dtrace-temp.c"
+            fdesc = open(fname, mode='w')
+        except: # but that doesn't work for  -o /dev/null - see rhbz1504009
+            (ignore,fname) = mkstemp(suffix=".c")
+            fdesc = open(fname, mode='w')
         providers.semaphore_write(fdesc)
         fdesc.close()
         cc1 = os.environ.get("CC", "gcc")

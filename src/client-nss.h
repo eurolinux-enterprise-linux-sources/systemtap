@@ -14,14 +14,13 @@
 #include "session.h"
 #include "csclient.h"
 #include "cscommon.h"
+#include "nss-server-info.h"
 #include <string>
 #include <vector>
 
 // Utility functions
 void nss_client_query_server_status (systemtap_session &s);
 void nss_client_manage_server_trust (systemtap_session &s);
-
-struct compile_server_info;
 
 class nss_client_backend : public client_backend
 {
@@ -32,7 +31,8 @@ public:
   int add_protocol_version (const std::string &version);
   int add_sysinfo ();
   int include_file_or_directory (const std::string &subdir,
-				 const std::string &path);
+				 const std::string &path,
+				 const bool add_arg = true);
   int add_tmpdir_file (const std::string &) { return 0; };
   int add_cmd_arg (const std::string &arg);
 
@@ -42,6 +42,9 @@ public:
 
   void add_mok_fingerprint(const std::string &fingerprint);
   int finalize_mok_fingerprints();
+
+  void fill_in_server_info (compile_server_info &) { return; };
+  int trust_server_info (const compile_server_info &server);
 
   int package_request ();
   int find_and_connect_to_server ();
@@ -60,7 +63,6 @@ private:
   int compile_using_server (std::vector<compile_server_info> &servers);
   void show_server_compatibility () const;
 };
-
 #endif	// HAVE_NSS
 
 #endif	// CLIENT_NSS_H

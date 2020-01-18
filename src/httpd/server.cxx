@@ -1,5 +1,5 @@
 // systemtap compile-server web api server
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -10,6 +10,8 @@
 #include <iostream>
 #include <string>
 #include "../util.h"
+#include "utils.h"
+#include "nss_funcs.h"
 
 extern "C"
 {
@@ -20,6 +22,8 @@ extern "C"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <json-c/json.h>
+#include <sys/utsname.h>
 }
 
 using namespace std;
@@ -28,9 +32,73 @@ static int
 get_key_values(void *cls, enum MHD_ValueKind /*kind*/,
 	       const char *key, const char *value)
 {
-    struct request *rq_info = static_cast<struct request *>(cls);
+    post_params_t *params = static_cast<post_params_t *>(cls);
+    if (value[0] == '{')
+      {
+        enum json_tokener_error json_error;
+        json_object *root = json_tokener_parse_verbose (value, &json_error);
+        if (root == NULL)
+          {
+	    server_error(json_tokener_error_desc (json_error));
+            return MHD_NO;
+          }
 
-    rq_info->params[key].push_back(value ? value : "");
+        json_object_object_foreach (root, jkey, jval)
+          {
+            switch (json_object_get_type (jval)) {
+            case json_type_array:
+              {
+		  for (size_t i = 0; i < (size_t)json_object_array_length (jval); i++) {
+                  json_object *jarrval = json_object_array_get_idx (jval, i);
+                  const char* jvalue = json_object_get_string (jarrval);
+                  switch (json_object_get_type (jarrval)) {
+                    case json_type_string:
+                      // this handles e.g. "cmd_args":["-v","path.stp"]
+                      {
+                        (*params)[jkey].push_back(jvalue ? jvalue : "");
+                        break;
+                      }
+                    case json_type_object:
+                      // this handles e.g. "file_info":[{"file_name":"a", "file_pkg":"b", "build_id":"9"}]
+                      {
+                        json_object_object_foreach (jarrval, jsubkey, jsubval)
+                          {
+                            (*params)[jsubkey].push_back(json_object_get_string (jsubval));
+                          }
+                        break;
+                      }
+                    default:
+                      break;
+                  }
+                }
+                break;
+              }
+            case json_type_object:
+              {
+                // this handles e.g. "local vars":{"LANG":"en_US.UTF-8","LC_MESSAGES":"en_US.UTF-8"}
+                json_object_object_foreach (jval, jsubkey, jsubval)
+                  {
+                    string assign = autosprintf ("%s=%s", jsubkey, json_object_get_string (jsubval));
+                    (*params)[jkey].push_back(assign);
+                  }
+                break;
+              }
+            case json_type_string:
+              {
+                // this handles e.g. "kver":"4.13.15-300.fc27.x86_64"
+                const char* jvalue = json_object_get_string (jval);
+                (*params)[jkey].push_back(jvalue ? jvalue : "");
+                break;
+              }
+            default:
+              break;
+            }
+          }
+	json_object_put(root);
+        return MHD_YES;
+      }
+
+    (*params)[key].push_back(value ? value : "");
     return MHD_YES;
 }
 
@@ -66,7 +134,7 @@ struct connection_info
 			 size_t size);
 
     MHD_PostProcessor *postprocessor;
-    map<string, vector<string>> post_params;
+    post_params_t post_params;
 
     string post_dir;
     map<string, vector<upload_file_info>> post_files;
@@ -94,7 +162,11 @@ struct connection_info
 void
 connection_info::post_files_cleanup()
 {
-    post_dir.clear();
+    // Note that we can't remove the post_dir here, it is too
+    // soon. We'll let the api layer handle it.
+    if (! post_dir.empty()) {
+	post_dir.clear();
+    }
     for (auto i = post_files.begin(); i != post_files.end(); i++) {
 	if (! i->second.empty()) {
 	    for (auto j = i->second.begin(); j != i->second.end();
@@ -139,10 +211,8 @@ connection_info::postdataiterator(enum MHD_ValueKind kind,
 				  size_t size)
 {
     if (filename && key) {
-	clog << __FUNCTION__ << ":" << __LINE__
-	     << ": key='" << key
-	     << "', filename='" << filename 
-	     << ", size=" << size << endl;
+	server_error(_F("key='%s', filename='%s', size=%ld", key, filename,
+			size));
 
 	// If we've got a filename, we need a temporary directory to
 	// put it in. Otherwise if we're handling multiple requests at
@@ -204,7 +274,8 @@ connection_info::postdataiterator(enum MHD_ValueKind kind,
 	}
     }
     else if (key) {
-	return get_key_values(&post_params, kind, key, data);
+	string value(data, size);
+	return get_key_values(&post_params, kind, key, value.c_str());
     }
     return MHD_YES;
 }
@@ -236,6 +307,56 @@ response
 request_handler::DELETE(const request &)
 {
     return get_404_response();
+}
+
+class base_dir_rh : public request_handler
+{
+public:
+    base_dir_rh(string n);
+
+    response GET(const request &req);
+    string arch;
+    string cert_info;
+};
+
+base_dir_rh::base_dir_rh(string n) : request_handler(n)
+{
+    // Get the current arch name.
+    struct utsname buf;
+    (void)uname(&buf);
+    arch = buf.machine;
+}
+
+response base_dir_rh::GET(const request &)
+{
+    response r(0);
+    ostringstream os;
+
+    // Get own certificate information (if needed). Note that we can't
+    // call nss_get_server_cert_info() in the base_dir_rh class
+    // constructor, since NSS hasn't been initialized at that point.
+    if (cert_info.empty())
+	cert_info = nss_get_server_cert_info();
+
+    server_error("base_dir_rh::GET");
+    r.status_code = 200;
+    r.content_type = "application/json";
+    os << "{" << endl;
+    os << "  \"version\": \"" VERSION "\"," << endl;
+    os << "  \"arch\": \"" << arch << "\"," << endl;
+    os << "  \"cert_info\": \"" << cert_info << "\"" << endl;
+    os << "}" << endl;
+    r.content = os.str();
+    return r;
+}
+
+base_dir_rh base_rh("base dir");
+
+server::server(uint16_t port, string &cert_db_path)
+    : port(port), dmn_ipv4(NULL), cert_db_path(cert_db_path)
+{
+    add_request_handler("/$", base_rh);
+    start();
 }
 
 void
@@ -319,8 +440,8 @@ server::access_handler(struct MHD_Connection *connection,
 
     struct request rq_info;
     request_handler *rh = NULL;
-    clog << "Looking for a matching request handler match with '"
-	 << url_str << "'..." << endl;
+    server_error(_F("Looking for a matching request handler match with '%s'...",
+		    url_str.c_str()));
     {
 	// Use a lock_guard to ensure the mutex gets released even if an
 	// exception is thrown.
@@ -332,7 +453,7 @@ server::access_handler(struct MHD_Connection *connection,
 	    string url_path_re = get<0>(*it);
 	    if (regexp_match(url_str, url_path_re, rq_info.matches) == 0) {
 		rh = get<1>(*it);
-		clog << "Found a match with '" << rh->name << "'" << endl;
+		server_error(_F("Found a match with '%s'", rh->name.c_str()));
 		break;
 	    }
 	}
@@ -348,7 +469,7 @@ server::access_handler(struct MHD_Connection *connection,
 			       ? MHD_POSTDATA_KIND
 			       : MHD_GET_ARGUMENT_KIND);
     MHD_get_connection_values(connection, kind, &get_key_values,
-			      &rq_info);
+			      &rq_info.params);
 
     // POST data might or might not have been handled by
     // MHD_get_connection_values(). We have to post-process the POST
@@ -476,7 +597,7 @@ void
 server::stop()
 {
     if (dmn_ipv4 != NULL) {
-	clog << "Stopping daemon..." << endl;
+	server_error("Stopping daemon...");
 	MHD_stop_daemon(dmn_ipv4);
 	dmn_ipv4 = NULL;
         running_cv.notify_all(); // notify waiters

@@ -50,6 +50,7 @@ struct option stap_long_options[] = {
   { "suppress-time-limits",        no_argument,       NULL, LONG_OPT_SUPPRESS_TIME_LIMITS },
   { "runtime",                     required_argument, NULL, LONG_OPT_RUNTIME },
   { "dyninst",                     no_argument,       NULL, LONG_OPT_RUNTIME_DYNINST },
+  { "bpf",                         no_argument,       NULL, LONG_OPT_RUNTIME_BPF },
   { "benchmark-sdt",               no_argument,       NULL, LONG_OPT_BENCHMARK_SDT },
   { "benchmark-sdt-loops",         required_argument, NULL, LONG_OPT_BENCHMARK_SDT_LOOPS },
   { "benchmark-sdt-threads",       required_argument, NULL, LONG_OPT_BENCHMARK_SDT_THREADS },
@@ -60,5 +61,6 @@ struct option stap_long_options[] = {
   { "target-namespaces",           required_argument, NULL, LONG_OPT_TARGET_NAMESPACES },
   { "monitor",                     optional_argument, NULL, LONG_OPT_MONITOR },
   { "interactive",                 no_argument,       NULL, LONG_OPT_INTERACTIVE},
+  { "example",                     no_argument,       NULL, LONG_OPT_RUN_EXAMPLE},
   { NULL, 0, NULL, 0 }
 };

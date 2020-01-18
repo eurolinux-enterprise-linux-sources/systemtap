@@ -1,7 +1,7 @@
 dnl configure.ac --- autoconf input file for systemtap
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([systemtap], 3.2, systemtap@sourceware.org, systemtap)
+AC_INIT([systemtap], 3.3, systemtap@sourceware.org, systemtap)
 dnl                  ^^^ see also NEWS, systemtap.spec, testsuite/configure.ac
 dnl                      doc/SystemTap_Beginners_Guide/en-US/Book_Info.xml
 
@@ -61,15 +61,18 @@ fi
 # Now we'll update the _AM_PYTHON_INTERPRETER_LIST variable (which
 # AM_PATH_PYTHON uses) to only be version 2 versions of python. Note
 # that the m4_define happens when autoconf is run, but the
-# FIRST_PYTHON_INTERPRETER variable expansion will happen when the
+# PLAIN_PYTHON_INTERPRETER variable expansion will happen when the
 # user runs configure.
+#
+# Note that for python2, we prefer an executable named 'python2' over
+# one just named 'python'.
 if test "x$PYTHON_UNKNOWN" != "xno" -a "x$ac_cv_python_unknown_version" = "x2"; then
-   FIRST_PYTHON_INTERPRETER=python
+   PLAIN_PYTHON_INTERPRETER=python
 else
-   FIRST_PYTHON_INTERPRETER=python2
+   PLAIN_PYTHON_INTERPRETER=python2
 fi
 m4_define([_AM_PYTHON_INTERPRETER_LIST],
-	  [$FIRST_PYTHON_INTERPRETER python2 python2.7 python2.6])
+	  [python2 $PLAIN_PYTHON_INTERPRETER python2.7 python2.6])
 
 # Now we can call AM_PATH_PYTHON to find python version 2.6+ (and
 # version 2 only).
@@ -169,12 +172,14 @@ AS_IF([test "x$enable_sdt_probes" != xno], [
 dnl We're now requiring *some* C++11, using RHEL6 (gcc 4.4.7) as a baseline.
 dnl This is too strict about __cplusplus for gcc < 4.7, so we have a manual fallback.
 AX_CXX_COMPILE_STDCXX(11, noext, optional)
+have_cxx0x="no"
 AS_IF([test "x$HAVE_CXX11" != x1],[
   AC_LANG_PUSH(C++)
   AX_CHECK_COMPILE_FLAG([-std=c++0x], [
       AC_MSG_NOTICE([Compiling with -std=c++0x])
       CXX="$CXX -std=c++0x"
       HAVE_CXX11=1
+      have_cxx0x="yes"
     ], [
       AC_MSG_ERROR([A compiler with C++11 support is required.])
     ])
@@ -286,12 +291,16 @@ AC_ARG_ENABLE([crash],
 AM_CONDITIONAL([BUILD_CRASHMOD], [test "$enable_crash" != "no"])
 
 dnl Handle the option to build the documentation
+dnl --enable-docs=check checks for LaTeX et al. and decides accordingly
 building_docs="no"
+dnl Handle the option to install the prebuilt PDFs and man pages.
+dnl Automatically turned on if --enable-docs is on or if --enable-docs=prebuilt.
+installing_prebuilt_docs="yes"
 AC_ARG_ENABLE([docs],
   AS_HELP_STRING([--enable-docs],
-    [enable building documentation (default on if latex etc. found).]),
+    [enable building documentation (default to only installing prebuilt docs).]),
   [enable_docs=$enableval],
-  [enable_docs="check"])
+  [enable_docs="prebuilt"])
 AC_CHECK_PROG(have_latex, latex, yes, no)
 AC_CHECK_PROG(have_dvips, dvips, yes, no)
 AC_CHECK_PROG(have_ps2pdf, ps2pdf, yes, no)
@@ -303,10 +312,18 @@ if test "x${have_latex}${have_dvips}${have_ps2pdf}" != "xyesyesyes"; then
     AC_MSG_WARN([will not build documentation, cannot find all tools])
   fi
 fi
-if test "x${have_latex}${have_dvips}${have_ps2pdf}" == "xyesyesyes" -a "$enable_docs" != "no"; then
+if test "$enable_docs" == "prebuilt"; then
+  AC_MSG_NOTICE([will only install prebuilt documentation])
+fi
+if test "x${have_latex}${have_dvips}${have_ps2pdf}" == "xyesyesyes" -a "$enable_docs" != "no" -a "$enable_docs" != "prebuilt"; then
    building_docs="yes"
+   installing_prebuilt_docs="yes"
+fi
+if test "$enable_docs" == "no"; then
+   installing_prebuilt_docs="no"
 fi
 AM_CONDITIONAL([BUILD_DOCS], [test "$building_docs" == "yes"])
+AM_CONDITIONAL([INSTALL_PREBUILT_DOCS], [test "$installing_prebuilt_docs" == "yes"])
 
 
 dnl Handle the option to build the reference documentation
@@ -596,12 +613,6 @@ AC_SUBST(stapbpf_LIBS)
 AC_MSG_NOTICE([staprun will link $staprun_LIBS])
 AC_MSG_NOTICE([stapbpf will link $stapbpf_LIBS])
 
-
-dnl Plop in the build (configure) date
-date=`date +%Y-%m-%d`
-AC_DEFINE_UNQUOTED(DATE, "$date", [Configuration/build date])
-AC_SUBST(DATE, "$date")
-
 # Before PR4037, we used to arrange to pass CFLAGS+=-m64 for a staprun
 # being compiled on 32-bit userspace but running against 64-bit kernels.
 # This is no longer necessary.
@@ -687,8 +698,7 @@ AC_ARG_WITH([python2-probes],
 have_python2_support=no
 AS_IF([test "x$with_python2_probes" != "xno"],
   [dnl First, check to make sure we have the 'python-config' script.
-   pathless_python=$(basename "$PYTHON")
-   AC_PATH_PROG([PYTHON_CONFIG], [${pathless_python}-config], [no])
+   AC_PATH_PROGS([PYTHON_CONFIG], [python2-config python-config], [no])
    AS_IF([test "x$PYTHON_CONFIG" != "xno"],
 	 [dnl Use the 'python-config' script to find the python
 	  dnl include directories.
@@ -752,7 +762,7 @@ AM_CONDITIONAL([HAVE_PYTHON_PROBES],
   [test "x$have_python2_support" = "xyes" -o "x$have_python3_support" = "xyes"])
 
 dnl Check for presence of json-c and ncurses for use in monitor mode
-PKG_CHECK_MODULES([jsonc], [json-c >= 0.12], [have_jsonc=yes], [have_jsonc=no])
+PKG_CHECK_MODULES([jsonc], [json-c >= 0.11], [have_jsonc=yes], [have_jsonc=no])
 PKG_CHECK_MODULES([ncurses], [ncurses], [have_ncurses=yes], [have_ncurses=no])
 AM_CONDITIONAL([HAVE_MONITOR_LIBS], [test "${have_jsonc}" == "yes" -a "${have_ncurses}" == "yes"])
 if test "${have_jsonc}" == "yes" -a "${have_ncurses}" == yes; then
@@ -780,8 +790,12 @@ if test $stap_cv_sectionq = yes; then
 fi
 
 dnl Check if we have <linux/bpf.h> for bpf backend.
-AC_CHECK_HEADERS(linux/bpf.h)
-AM_CONDITIONAL(HAVE_LINUX_BPF_H, [test "x$ac_cv_header_linux_bpf_h" = "xyes"])
+AC_DEFINE([HAVE_BPF_DECLS], [0], [Define to 1 if you have the necessary declarations in bpf.h])
+AC_CHECK_DECLS([BPF_PROG_TYPE_PERF_EVENT],
+               [AC_DEFINE([HAVE_BPF_DECLS], [1])],
+               [],
+               [#include <linux/bpf.h>])
+AM_CONDITIONAL(HAVE_BPF_DECLS, [test "x$ac_cv_have_decl_BPF_PROG_TYPE_PERF_EVENT" == "xyes"])
 
 AC_CONFIG_FILES([includes/sys/sdt-config.h po/Makefile.in])
 
@@ -921,9 +935,10 @@ AS_IF([test "x$enable_http" = "xyes"],
    dnl Do we have the curl library?
    PKG_CHECK_MODULES([libcurl], [libcurl >= 7.19.7], [have_libcurl=true], [have_libcurl=false])
 
-   dnl If we have all of the libraries (and the json-c library), we could
-   dnl build the httpd web compilation service.
-   AS_IF([test "x$have_libmicrohttpd" == "xtrue" -a "x$have_libuuid" == "xtrue" -a "x$have_libcurl" == "xtrue" -a "x$have_jsonc" == "xyes"], [have_http_support=yes])])
+   dnl If we have all of the libraries, the json-c and nss libraries,
+   dnl and full C++11 support, we could build the httpd web
+   dnl compilation service.
+   AS_IF([test "x$have_libmicrohttpd" == "xtrue" -a "x$have_libuuid" == "xtrue" -a "x$have_libcurl" == "xtrue" -a "x$have_jsonc" == "xyes" -a "x$have_nss" == "xyes" -a "x$have_cxx0x" == "xno"], [have_http_support=yes])])
 
 AS_IF([test "x$have_http_support" = "xyes"],
   [AC_DEFINE([HAVE_HTTP_SUPPORT], [1],
@@ -974,11 +989,15 @@ AC_CONFIG_FILES([java/stapbm], [chmod +x java/stapbm])
 AC_CONFIG_FILES(python/Makefile)
 AC_CONFIG_FILES(staprun/Makefile)
 AC_CONFIG_FILES(stapbpf/Makefile)
-AC_CONFIG_FILES(httpd/Makefile)
+AC_CONFIG_FILES([httpd/Makefile httpd/docker/Makefile])
 AC_CONFIG_FILES([staprun/run-staprun], [chmod +x staprun/run-staprun])
 AC_CONFIG_FILES([staprun/guest/stapshd], [chmod +x staprun/guest/stapshd])
 AC_CONFIG_FILES([staprun/guest/stapsh-daemon], [chmod +x staprun/guest/stapsh-daemon])
 AC_CONFIG_FILES([staprun/guest/stapsh@.service])
+
+dnl AC_CONFIG_FILES([macros.systemtap])
+dnl ^^^ not that one, because we want to expand $vars etc. to fqdn's,
+dnl so we do the mapping in the Makefile.am
 
 # Setup "shadow" directory doc/beginners that has the basic directories  setup for
 # xmlto in one directory (through directory links if necessary).

@@ -1,5 +1,6 @@
 %{!?with_sqlite: %global with_sqlite 0%{?fedora} >= 17 || 0%{?rhel} >= 7}
-%{!?with_docs: %global with_docs 1}
+# prefer prebuilt docs
+%{!?with_docs: %global with_docs 0}
 %{!?with_htmldocs: %global with_htmldocs 0}
 %{!?with_monitor: %global with_monitor 1}
 # crash is not available
@@ -18,11 +19,10 @@
 %else
 %{!?with_dyninst: %global with_dyninst 0}
 %endif
-%ifarch aarch64
-# aarch64 rhel7 kernel is new enough to have linux/bpf.h
-%{!?with_bpf: %global with_bpf 0%{?fedora} >= 22 || 0%{?rhel} >= 7}
+%ifarch x86_64
+%{!?with_bpf: %global with_bpf 1}
 %else
-%{!?with_bpf: %global with_bpf 0%{?fedora} >= 22 || 0%{?rhel} >= 8}
+%{!?with_bpf: %global with_bpf 0}
 %endif
 %{!?with_systemd: %global with_systemd 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
 %{!?with_emacsvim: %global with_emacsvim 0%{?fedora} >= 19 || 0%{?rhel} >= 7}
@@ -38,9 +38,9 @@
 %{!?with_openssl: %global with_openssl 0}
 %endif
 %{!?with_pyparsing: %global with_pyparsing 0%{?fedora} >= 18 || 0%{?rhel} >= 7}
-%{!?with_python3: %global with_python3 0%{?fedora} >= 23}
-%{!?with_python2_probes: %global with_python2_probes 1}
-%{!?with_python3_probes: %global with_python3_probes 0%{?fedora} >= 23}
+%{!?with_python3: %global with_python3 0%{?fedora} >= 23 || 0%{?rhel} > 7}
+%{!?with_python2_probes: %global with_python2_probes (0%{?fedora} <= 28 && 0%{?rhel} <= 7)}
+%{!?with_python3_probes: %global with_python3_probes (0%{?fedora} >= 23 || 0%{?rhel} > 7)}
 %{!?with_httpd: %global with_httpd 0}
 
 %ifarch ppc64le aarch64
@@ -71,25 +71,26 @@
    %define dracutstap %{_prefix}/share/dracut/modules.d/99stap
 %endif
 
-%if 0%{?rhel} >= 6
+%if 0%{?rhel} == 6 || 0%{?rhel} == 7
     %define dracutbindir /sbin
 %else
     %define dracutbindir %{_bindir}
 %endif
 
+%if 0%{?rhel} == 6
+    %{!?_rpmmacrodir: %define _rpmmacrodir /etc/rpm/}
+%else
+    %{!?_rpmmacrodir: %define _rpmmacrodir %{_rpmconfigdir}/macros.d}
+%endif
+
+# To avoid testsuite/*/*.stp has shebang which doesn't start with '/'
+%undefine __brp_mangle_shebangs  
+
 Name: systemtap
-Version: 3.2
-Release: 8%{?dist}
+Version: 3.3
+Release: 3%{?dist}
 # for version, see also configure.ac
 
-Patch10: rhbz1504009.patch
-Patch11: rhbz1506230.patch
-Patch12: rhbz1490862.patch
-Patch13: rhbz1527809.patch
-Patch14: rhbz1558350.patch
-Patch15: rhbz1567356.patch
-Patch16: rhbz1566422.patch
-Patch17: rhbz1563052.patch
 
 # Packaging abstract:
 #
@@ -125,7 +126,6 @@ URL: http://sourceware.org/systemtap/
 Source: ftp://sourceware.org/pub/systemtap/releases/systemtap-%{version}.tar.gz
 
 # Build*
-BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: gcc-c++
 BuildRequires: gettext-devel
 BuildRequires: pkgconfig(nss)
@@ -193,8 +193,12 @@ BuildRequires: readline-devel
 BuildRequires: pkgconfig(ncurses)
 %endif
 %if %{with_python2_probes}
-BuildRequires: python-devel
+BuildRequires: python2-devel
+%if 0%{?fedora} >= 1
+BuildRequires: python2-setuptools
+%else
 BuildRequires: python-setuptools
+%endif
 %endif
 %if %{with_python3_probes}
 BuildRequires: python3-devel
@@ -210,6 +214,14 @@ BuildRequires: libuuid-devel
 Requires: systemtap-client = %{version}-%{release}
 Requires: systemtap-devel = %{version}-%{release}
 
+Patch10: rhbz1547238.patch
+Patch11: rhbz1591267.patch
+Patch12: rhbz1544689.patch
+Patch13: rhbz1560044.1.patch
+Patch14: rhbz1560044.2.patch
+Patch15: rhbz1560044.3.patch
+
+
 %description
 SystemTap is an instrumentation system for systems running Linux.
 Developers can write instrumentation scripts to collect data on
@@ -224,10 +236,7 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires: systemtap-devel = %{version}-%{release}
-# On RHEL[45], /bin/mktemp comes from the 'mktemp' package.  On newer
-# distributions, /bin/mktemp comes from the 'coreutils' package.  To
-# avoid a specific RHEL[45] Requires, we'll do a file-based require.
-Requires: nss /bin/mktemp
+Requires: nss coreutils
 Requires: zip unzip
 Requires(pre): shadow-utils
 Requires(post): chkconfig
@@ -330,7 +339,11 @@ URL: http://sourceware.org/systemtap/
 %if %{with_python3}
 Requires: python3-pyparsing
 %else
+%if 0%{?rhel} >= 7
 Requires: pyparsing
+%else
+Requires: python2-pyparsing
+%endif
 %endif
 %endif
 
@@ -406,7 +419,7 @@ License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires: systemtap-runtime = %{version}-%{release}
 Requires: byteman > 2.0
-Requires: net-tools
+Requires: iproute
 
 %description runtime-java
 This package includes support files needed to run systemtap scripts
@@ -434,6 +447,11 @@ Group: Development/System
 License: GPLv2+
 URL: http://sourceware.org/systemtap/
 Requires: systemtap-runtime = %{version}-%{release}
+
+%if ! (%{with_python2_probes})
+# Provide an clean upgrade path when the python2 package is removed
+Obsoletes: %{name}-runtime-python2 < %{version}-%{release}
+%endif
 
 %description runtime-python3
 This package includes support files needed to run systemtap scripts
@@ -498,8 +516,7 @@ cd ..
 %patch13 -p1
 %patch14 -p1
 %patch15 -p1
-%patch16 -p1
-%patch17 -p1
+
 
 %build
 
@@ -553,7 +570,7 @@ cd ..
 %global docs_config --enable-docs --disable-htmldocs
 %endif
 %else
-%global docs_config --disable-docs
+%global docs_config --enable-docs=prebuilt
 %endif
 
 # Enable pie as configure defaults to disabling it
@@ -604,10 +621,16 @@ cd ..
 %global httpd_config --disable-httpd
 %endif
 
+%if %{with_bpf}
+%global bpf_config --with-bpf
+%else
+%global bpf_config --without-bpf
+%endif
+
 # We don't ship compileworthy python code, just oddball samples
 %global py_auto_byte_compile 0
 
-%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{rpm_config} %{java_config} %{virt_config} %{dracut_config} %{python3_config} %{python2_probes_config} %{python3_probes_config} %{httpd_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
+%configure %{?elfutils_config} %{dyninst_config} %{sqlite_config} %{crash_config} %{docs_config} %{pie_config} %{rpm_config} %{java_config} %{virt_config} %{dracut_config} %{python3_config} %{python2_probes_config} %{python3_probes_config} %{httpd_config} %{bpf_config} --disable-silent-rules --with-extra-version="rpm %{version}-%{release}"
 make %{?_smp_mflags}
 
 %if %{with_emacsvim}
@@ -644,18 +667,20 @@ install -c -m 755 stap-prep $RPM_BUILD_ROOT%{_bindir}/stap-prep
 # Copy over the testsuite
 cp -rp testsuite $RPM_BUILD_ROOT%{_datadir}/systemtap
 
-%if %{with_docs}
 # We want the manuals in the special doc dir, not the generic doc install dir.
 # We build it in place and then move it away so it doesn't get installed
 # twice. rpm can specify itself where the (versioned) docs go with the
 # %doc directive.
 mkdir docs.installed
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/*.pdf docs.installed/
+%if %{with_docs}
 %if %{with_htmldocs}
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/tapsets docs.installed/
 mv $RPM_BUILD_ROOT%{_datadir}/doc/systemtap/SystemTap_Beginners_Guide docs.installed/
 %endif
 %endif
+
+install -D -m 644 macros.systemtap $RPM_BUILD_ROOT%{_rpmmacrodir}/macros.systemtap
 
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/stap-server
 mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/lib/stap-server
@@ -724,9 +749,6 @@ done
    touch $RPM_BUILD_ROOT%{dracutstap}/params.conf
 %endif
 
-%clean
-rm -rf ${RPM_BUILD_ROOT}
-
 %pre runtime
 getent group stapusr >/dev/null || groupadd -g 156 -r stapusr 2>/dev/null || groupadd -r stapusr
 getent group stapsys >/dev/null || groupadd -g 157 -r stapsys 2>/dev/null || groupadd -r stapsys
@@ -738,6 +760,15 @@ getent group stap-server >/dev/null || groupadd -g 155 -r stap-server 2>/dev/nul
 getent passwd stap-server >/dev/null || \
   useradd -c "Systemtap Compile Server" -u 155 -g stap-server -d %{_localstatedir}/lib/stap-server -r -s /sbin/nologin stap-server 2>/dev/null || \
   useradd -c "Systemtap Compile Server" -g stap-server -d %{_localstatedir}/lib/stap-server -r -s /sbin/nologin stap-server
+
+%pre testsuite
+getent passwd stapusr >/dev/null || \
+    useradd -c "Systemtap 'stapusr' User" -g stapusr -r -s /sbin/nologin stapusr
+getent passwd stapsys >/dev/null || \
+    useradd -c "Systemtap 'stapsys' User" -g stapsys -G stapusr -r -s /sbin/nologin stapsys
+getent passwd stapdev >/dev/null || \
+    useradd -c "Systemtap 'stapdev' User" -g stapdev -G stapusr -r -s /sbin/nologin stapdev
+exit 0
 
 %post server
 
@@ -1075,8 +1106,8 @@ done
 %{_datadir}/systemtap/examples
 %{!?_licensedir:%global license %%doc}
 %license COPYING
-%if %{with_docs}
 %doc docs.installed/*.pdf
+%if %{with_docs}
 %if %{with_htmldocs}
 %doc docs.installed/tapsets/*.html
 %doc docs.installed/SystemTap_Beginners_Guide
@@ -1121,6 +1152,7 @@ done
 %{_includedir}/sys/sdt.h
 %{_includedir}/sys/sdt-config.h
 %{_mandir}/man1/dtrace.1*
+%{_rpmmacrodir}/macros.systemtap
 %doc README AUTHORS NEWS 
 %{!?_licensedir:%global license %%doc}
 %license COPYING
@@ -1180,6 +1212,19 @@ done
 
 # PRERELEASE
 %changelog
+* Fri Sep 14 2018 Serhei Makarov <smakarov@redhat.com> - 3.3-3
+- Add BPF left-operand fix (rhbz1560044) (x86-64 only)
+- Add stap.1 note on missing stapbpf.8 (rhbz1560044)
+- Fix RHEL-ALT build (rhbz1544689)
+
+* Tue Jun 26 2018 Frank Ch. Eigler <fche@redhat.com> - 3.3-2
+- Enable BPF build (rhbz1544689, rhbz1311586) (x86-64 only)
+- Fix vfs.add_to_page_cache probe (rhbz1547238)
+- Fix foreach_limit.exp compilability (rhbz1591267)
+
+* Sat Jun 09 2018 Frank Ch. Eigler <fche@redhat.com> - 3.3-1
+- Upstream release.
+
 * Tue Apr 24 2018 Frank Ch. Eigler <fche@redhat.com> - 3.2-8
 - rhbz1563052 (stp_deref string truncation off-by-one error)
 

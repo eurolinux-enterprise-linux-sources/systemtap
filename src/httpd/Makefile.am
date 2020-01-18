@@ -1,6 +1,8 @@
 # Makefile.am --- automake input file for systemtap
 
-AUTOMAKE_OPTIONS = subdir-objects
+SUBDIRS = docker
+
+AUTOMAKE_OPTIONS = no-dist foreign subdir-objects
 
 AM_CFLAGS = -Wall -Wextra -Werror -Wunused -W -Wformat=2
 AM_CXXFLAGS = -Wall -Wextra -Werror -Wunused -W -Wformat=2
@@ -16,11 +18,11 @@ AM_LDFLAGS = @PIELDFLAGS@
 if HAVE_HTTP_SUPPORT
 pkglibexec_PROGRAMS = stap-httpd
 
-stap_httpd_SOURCES = main.cxx server.cxx api.cxx backends.cxx ../util.cxx
-stap_httpd_CFLAGS = $(AM_CFLAGS)
-stap_httpd_CXXFLAGS = $(AM_CXXFLAGS)
-stap_httpd_CPPFLAGS = $(AM_CPPFLAGS)
-stap_httpd_LDADD = -lpthread -lmicrohttpd -luuid -ljson-c
+stap_httpd_SOURCES = main.cxx server.cxx api.cxx backends.cxx utils.cxx nss_funcs.cxx ../util.cxx ../cmdline.cxx ../nsscommon.cxx ../privilege.cxx ../cscommon.cxx ../mdfour.c
+stap_httpd_CFLAGS = $(AM_CFLAGS) $(nss_CFLAGS)
+stap_httpd_CXXFLAGS = $(AM_CXXFLAGS) $(nss_CFLAGS)
+stap_httpd_CPPFLAGS = $(AM_CPPFLAGS) $(nss_CFLAGS)
+stap_httpd_LDADD = -lpthread -lmicrohttpd -luuid -ljson-c $(nss_LIBS)
 stap_httpd_LDFLAGS =  $(AM_LDFLAGS)
 endif
 

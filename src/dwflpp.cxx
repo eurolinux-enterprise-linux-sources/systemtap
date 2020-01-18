@@ -2337,9 +2337,6 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
   for(auto it = funcs.begin(); it != funcs.end(); it++)
     {
       Dwarf_Addr entrypc = it->entrypc;
-      Dwarf_Addr highpc; // NB: highpc is exclusive: [entrypc,highpc)
-      DWFL_ASSERT ("dwarf_highpc", dwarf_highpc (& it->die,
-                                                 & highpc));
 
       unsigned entrypc_srcline_idx = 0;
       Dwarf_Line *entrypc_srcline = NULL;
@@ -2373,8 +2370,8 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
         }
 
       if (sess.verbose>2)
-        clog << _F("searching for prologue of function '%s' %#" PRIx64 "-%#" PRIx64 
-                   "@%s:%d\n", it->name.to_string().c_str(), entrypc, highpc,
+        clog << _F("searching for prologue of function '%s' %#" PRIx64
+                   "@%s:%d\n", it->name.to_string().c_str(), entrypc,
                    it->decl_file.to_string().c_str(), it->decl_line);
 
       // For each function, we look for the prologue-end marker (e.g. clang
@@ -2384,7 +2381,7 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
 
       // We may have to skip a few because some old compilers plop
       // in dummy line records for longer prologues.  If we go too
-      // far (addr >= highpc), we take the previous one.  Or, it may
+      // far (outside function), we take the previous one.  Or, it may
       // be the first one, if the function had no prologue, and thus
       // the entrypc maps to a statement in the body rather than the
       // declaration.
@@ -2407,7 +2404,7 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
                        linesrc, lineno, lineprologue_end ? " (marked)" : "");
 
           // have we passed the function?
-          if (lineaddr >= highpc)
+          if (dwarf_haspc (& it->die, lineaddr) != 1)
             break;
           // is there an explicit prologue_end marker?
           if (lineprologue_end)
@@ -2433,7 +2430,7 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
 
 
       Dwarf_Addr postprologue_addr = DWARF_LINEADDR(postprologue_srcline);
-      if (postprologue_addr >= highpc)
+      if (dwarf_haspc (& it->die, postprologue_addr) != 1)
         {
           // pick addr of previous line record
           Dwarf_Line *lr = dwarf_onesrcline(lines, postprologue_srcline_idx-1);
@@ -2450,7 +2447,8 @@ dwflpp::resolve_prologue_endings (func_info_map_t & funcs)
           if (postprologue_addr == entrypc)
             clog << _(" (naked)");
           //TRANSLATORS: Here we're adding some classification datum (ie we went over)
-          if (DWARF_LINEADDR(postprologue_srcline) >= highpc)
+          if (dwarf_haspc (& it->die,
+			   DWARF_LINEADDR(postprologue_srcline)) != 1)
             clog << _(" (tail-call?)");
           //TRANSLATORS: Here we're adding some classification datum (ie it was marked)
           if (DWARF_LINEPROLOGUEEND(postprologue_srcline))
@@ -2468,7 +2466,21 @@ dwflpp::function_entrypc (Dwarf_Addr * addr)
 {
   assert (function);
   // PR10574: reject 0, which tends to be eliminated COMDAT
-  return (dwarf_entrypc (function, addr) == 0 && *addr != 0);
+  if (dwarf_entrypc (function, addr) == 0 && *addr != 0)
+    return true;
+
+  /* Assume the entry pc is the base address, or (if zero)
+     the first address of the ranges covering this DIE.  */
+  Dwarf_Addr start, end;
+  if (dwarf_ranges (function, 0, addr, &start, &end) >= 0)
+    {
+      if (*addr == 0)
+	*addr = start;
+
+      return *addr != 0;
+    }
+
+  return false;
 }
 
 

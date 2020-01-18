@@ -62,7 +62,7 @@ stap_SOURCES += interactive.cxx
 stap_LDADD += @READLINE_LIBS@
 endif
 
-if HAVE_LINUX_BPF_H
+if HAVE_BPF_DECLS
 stap_SOURCES += bpf-base.cxx bpf-bitset.cxx bpf-translate.cxx bpf-opt.cxx
 endif
 
@@ -76,6 +76,11 @@ stapvirt_LDADD = $(libvirt_LIBS) $(libxml2_LIBS)
 endif
 
 endif
+
+all: macros.systemtap
+
+macros.systemtap: $(srcdir)/macros.systemtap.in
+	sed -e "s#@pkgdatadir@#$(pkgdatadir)#g" < $< > $@
 
 install: all
 	$(MAKE) $(AM_MAKEFLAGS) install-recursive
@@ -137,7 +142,7 @@ stap_SOURCES += csclient.cxx
 endif
 
 if HAVE_NSS
-stap_SOURCES += nsscommon.cxx client-nss.cxx cscommon.cxx
+stap_SOURCES += nsscommon.cxx client-nss.cxx cscommon.cxx nss-server-info.cxx
 stap_CFLAGS += $(nss_CFLAGS) -DSTAP
 stap_CXXFLAGS += $(nss_CFLAGS)
 stap_CPPFLAGS += $(nss_CFLAGS)

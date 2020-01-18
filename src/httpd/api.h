@@ -1,5 +1,5 @@
 // systemtap compile-server web api header
-// Copyright (C) 2017 Red Hat Inc.
+// Copyright (C) 2017-2018 Red Hat Inc.
 //
 // This file is part of systemtap, and is free software.  You can
 // redistribute it and/or modify it under the terms of the GNU General
@@ -12,16 +12,39 @@
 #include "server.h"
 #include <string>
 #include <vector>
+#include <memory>
+extern "C" {
+#include "../privilege.h"
+#include <json-c/json_object.h>
+}
 
-struct client_request_data
+struct file_info
 {
+    std::string name;
+    std::string pkg;
+    std::string build_id;
+};
+
+class client_request_data
+{
+public:
+    ~client_request_data();
+
+    struct json_object *get_json_object() const;
+
     std::string kver;
     std::string arch;
-    std::string base_dir;
     std::string distro_name;
     std::string distro_version;
     std::vector<std::string> cmd_args;
     std::vector<std::string> files;
+    std::vector<std::shared_ptr<struct file_info> > file_info;
+    std::vector<std::string> env_vars;
+    unsigned verbose;
+    privilege_t privilege;
+
+    std::string server_dir;
+    std::string client_dir;
 };
 
 //extern bool

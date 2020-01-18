@@ -32,7 +32,8 @@ public:
   int add_protocol_version (const std::string &version);
   int add_sysinfo ();
   int include_file_or_directory (const std::string &subdir,
-				 const std::string &path);
+				 const std::string &path,
+				 const bool add_arg = true);
   int add_tmpdir_file (const std::string &file);
   int add_cmd_arg (const std::string &arg);
 
@@ -43,6 +44,8 @@ public:
   void add_mok_fingerprint(const std::string &fingerprint);
   int finalize_mok_fingerprints() { return 0; };
 
+  void fill_in_server_info (compile_server_info &info);
+  int trust_server_info (const compile_server_info &info);
 
   // FIXME: The 'request_parameters' data item isn't right. This means
   // we can only add string parameters, not numeric parameters. We
@@ -50,7 +53,9 @@ public:
   // 'request_numeric_parameters' - but then we get the ordering
   // wrong.
   std::vector<std::tuple<std::string, std::string>> request_parameters;
-  std::vector<std::tuple<std::string, std::string>> request_files;
+
+private:
+  bool files_seen;
 };
 
 #endif	// HAVE_HTTP_SUPPORT

@@ -1,0 +1,19 @@
+commit 8f316871901ec2f54b5ef66416303ef5e87f1226
+Author: Serhei Makarov <smakarov@redhat.com>
+Date:   Fri Sep 14 14:15:05 2018 -0400
+
+    update man/stap.1.in with a note that stapbpf(8) is only present on x86_64
+
+diff --git a/man/stap.1.in b/man/stap.1.in
+index 4db25479f..a0f0d5814 100644
+--- a/man/stap.1.in
++++ b/man/stap.1.in
+@@ -2538,7 +2538,7 @@ Filter (eBPF) programs instead of a kernel module. eBPF programs are verified
+ by the kernel for safety and are executed by an in-kernel virtual machine.
+ This runtime is in an early stage of development and currently lacks support
+ for a number of features available in the default runtime. Please see the
+-\fIstapbpf\fR(8) man page for more information.
++\fIstapbpf\fR(8) man page for more information (only on x86_64 systems).
+ 
+ .SH EXIT STATUS
+ 

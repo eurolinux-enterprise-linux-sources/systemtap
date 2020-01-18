@@ -334,6 +334,54 @@ void disable_kprobes_optimization()
 }
 
 
+/* BZ1552745: /proc/sys/kernel/kptr_restrict makes /sys/module
+   ... addresses unreliable on 2018+ kernels.  circumstances.  We
+   tweak this security measure (setting it to '1'), unless told
+   otherwise by an environment variable.  We could turn it back later,
+   but this would create a race condition between concurrent runs of
+   staprun.  The '1' setting is nominally more secure than the default
+   '0', except that for /sys/module/$MODULE/sections/$SECTION the '0'
+   case produces obfuscated 0-based pointers, and '1' produces good
+   ones (to a root user).  Strange but true.
+*/
+void tweak_kptr_restrict()
+{
+        const char* proc_kptr = "/proc/sys/kernel/kptr_restrict";
+        char prev;
+        int rc, fd;
+        struct utsname uts;
+
+        /* Relevant change appears to have been introduced in v4.15 in
+         * commit ef0010a30935de4e0211. */
+        if ((uname (&uts) == 0) && (strverscmp (uts.release, "4.15") < 0))
+                return;
+
+        if (getenv ("STAP_BZ1552745_OVERRIDE"))
+                return;
+
+        /* See the initial state; if it's already set, we do nothing. */
+        fd = open (proc_kptr, O_RDONLY);
+        if (fd < 0) 
+                return;
+        rc = read (fd, &prev, sizeof(prev));
+        (void) close (fd);
+        if (rc < 1 || prev == '1') /* Already set or unavailable */
+                return;
+
+        fd = open (proc_kptr, O_WRONLY);
+        if (fd < 0) 
+                return;
+        prev = '1'; /* really, next */
+        rc = write (fd, &prev, sizeof(prev));
+        (void) close (fd);
+        if (rc == 1)
+                dbug(1, "Set %s.\n", proc_kptr);
+        else
+                dbug(1, "Error %d/%d setting %s.\n", rc, errno, proc_kptr);
+}
+
+
+
 int init_staprun(void)
 {
 	privilege_t user_credentials = pr_unknown;
@@ -533,13 +581,13 @@ int send_a_relocation (const char* module, const char* reloc, unsigned long long
           dbug (1, "module name too long: %s\n", module);
           return -EINVAL; 
   }
-  strncpy (msg.module, module, STP_MODULE_NAME_LEN);
+  strncpy (msg.module, module, STP_MODULE_NAME_LEN - 1);
   
   if (strlen(reloc) >= STP_SYMBOL_NAME_LEN-1) {
           dbug (1, "reloc name too long: %s\n", reloc);
           return -EINVAL; 
   }
-  strncpy (msg.reloc, reloc, STP_MODULE_NAME_LEN);
+  strncpy (msg.reloc, reloc, STP_MODULE_NAME_LEN - 1);
 
   msg.address = address;
 
@@ -698,6 +746,9 @@ int send_relocation_modules ()
 int send_relocations ()
 {
   int rc;
+
+  tweak_kptr_restrict();
+  
   rc = send_relocation_kernel ();
   if (rc == 0)
     rc = send_relocation_modules ();
@@ -716,13 +767,13 @@ int send_tzinfo ()
 #if 0
   tzset ();
   tzi.tz_gmtoff = timezone;
-  strncpy (tzi.tz_name, tzname[0], STP_TZ_NAME_LEN);
+  strncpy (tzi.tz_name, tzname[0], STP_TZ_NAME_LEN - 1);
 #endif
 
   time (& now_t);
   now = localtime (& now_t);
   tzi.tz_gmtoff = - now->tm_gmtoff;
-  strncpy (tzi.tz_name, now->tm_zone, STP_TZ_NAME_LEN);
+  strncpy (tzi.tz_name, now->tm_zone, STP_TZ_NAME_LEN - 1);
 
   rc = send_request(STP_TZINFO, & tzi, sizeof(tzi));
   if (rc != 0)
@@ -749,7 +800,7 @@ int send_remote_id ()
   int rc;
 
   rem.remote_id = remote_id;
-  strncpy (rem.remote_uri, remote_uri, STP_REMOTE_URI_LEN);
+  strncpy (rem.remote_uri, remote_uri, STP_REMOTE_URI_LEN - 1);
   rem.remote_uri [STP_REMOTE_URI_LEN-1]='\0'; /* XXX: quietly truncate */
   rc = send_request(STP_REMOTE_ID, & rem, sizeof(rem));
   if (rc != 0)

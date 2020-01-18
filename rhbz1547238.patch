@@ -1,0 +1,64 @@
+commit e40b26c5bbaab6fc8068fe5c111bdfeff0963408
+Author: Paulo Andrade <pandrade@redhat.com>
+Date:   Tue Jun 12 18:48:26 2018 -0400
+
+    rhbz1547238: adapt vfs.add_to_page_cache probes
+    
+    The add_to_page_cache_lru variant should also be probed, along with
+    kernel.function("add_to_page_cache_locked"), but if present, not the
+    add_to_page_cache variant.  This backward compatibility needed a
+    little bit of tapset probe point operator jiujitsu to go beyond
+    Paulo's initial patch.
+
+diff --git a/tapset/linux/vfs.stp b/tapset/linux/vfs.stp
+index 6f5fe77..1fe71ae 100644
+--- a/tapset/linux/vfs.stp
++++ b/tapset/linux/vfs.stp
+@@ -908,9 +908,16 @@ probe __vfs.ext4_mpage_readpages.return =
+ 	size = @entry($nr_pages)
+ }
+ 
++
++/* newer style */
++probe vfs.__add_to_page_cache =
++	kernel.function("add_to_page_cache_locked"),
++	kernel.function("add_to_page_cache_lru")
++     { }
++
+ probe vfs.add_to_page_cache =
+-	kernel.function("add_to_page_cache_locked") !,
+-	kernel.function("add_to_page_cache")
++	vfs.__add_to_page_cache !,
++	kernel.function("add_to_page_cache")  /* older style */
+ {
+ 	dev = $mapping->host->i_sb->s_dev
+ 	devname = __find_bdevname(dev, $mapping->host->i_sb->s_bdev)
+@@ -925,9 +932,16 @@ probe vfs.add_to_page_cache =
+ 	argstr = sprintf("%d, %d", ino, $offset)
+ }
+ 
++
++/* newer style */
++probe vfs.__add_to_page_cache.return =
++	kernel.function("add_to_page_cache_locked").return,
++	kernel.function("add_to_page_cache_lru").return
++     { }
++
+ probe vfs.add_to_page_cache.return =
+-	kernel.function("add_to_page_cache_locked").return !,
+-	kernel.function("add_to_page_cache").return
++	vfs.__add_to_page_cache.return !,
++	kernel.function("add_to_page_cache").return  /* older style */
+ {
+ 	name = "vfs.add_to_page_cache"
+ 	retstr = sprintf("%d", $return)
+diff --git a/testsuite/semok/vfs_add_to_page_cache.stp b/testsuite/semok/vfs_add_to_page_cache.stp
+new file mode 100755
+index 0000000..5edea75
+--- /dev/null
++++ b/testsuite/semok/vfs_add_to_page_cache.stp
+@@ -0,0 +1,4 @@
++#! stap -p2
++
++probe vfs.add_to_page_cache { println(name, argstr) }
++probe vfs.add_to_page_cache.return { println(name, retstr) }

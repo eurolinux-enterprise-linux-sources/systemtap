@@ -144,7 +144,7 @@ public:
 
   // NB: It is very important for all of the above (and below) fields
   // to be cleared in the systemtap_session ctor (session.cxx).
-  void setup_kernel_release (const char* kstr);
+  void setup_kernel_release (const std::string& kstr);
   void insert_loaded_modules ();
 
   // command line parsing
@@ -163,6 +163,7 @@ public:
   std::string script_file; // FILE
   std::string cmdline_script; // -e PROGRAM
   std::vector<std::string> additional_scripts; // -E SCRIPT
+  std::stringstream stdin_script;	       // stdin script (stap -)
   bool have_script;
   std::vector<std::string> include_path;
   int include_arg_start;
@@ -252,6 +253,7 @@ public:
   bool suppress_time_limits;
   bool color_errors;
   bool interactive_mode;
+  bool run_example;
   bool pass_1a_complete;
 
   enum { color_never, color_auto, color_always } color_mode;

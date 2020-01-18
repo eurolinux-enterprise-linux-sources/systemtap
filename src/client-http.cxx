@@ -28,7 +28,6 @@ extern "C" {
 #include <curl/easy.h>
 #include <json-c/json.h>
 #include <sys/stat.h>
-#include <ftw.h>
 #include <rpm/rpmlib.h>
 #include <rpm/header.h>
 #include <rpm/rpmts.h>
@@ -56,11 +55,12 @@ public:
   json_object *root;
   std::string host;
   std::map<std::string, std::string> header_values;
+  std::vector<std::tuple<std::string, std::string>> env_vars;
   enum download_type {json_type, file_type};
 
   bool download (const std::string & url, enum download_type type);
-  bool post (const std::string & url, std::vector<std::tuple<std::string, std::string>> &request_parameters);
-  void add_script_file (std::string script_type, std::string script_file);
+  bool post (const string & url, vector<tuple<string, string>> & request_parameters);
+  void add_file (std::string filename);
   void add_module (std::string module);
   void get_header_field (const std::string & data, const std::string & field);
   static size_t get_data_shim (void *ptr, size_t size, size_t nitems, void *client);
@@ -70,6 +70,8 @@ public:
   void get_buildid (string fname);
   void get_kernel_buildid (void);
   long get_response_code (void);
+  static int trace (CURL *, curl_infotype type, unsigned char *data, size_t size, void *);
+  bool delete_op (const std::string & url);
 
 private:
   size_t get_header (void *ptr, size_t size, size_t nitems);
@@ -77,7 +79,7 @@ private:
   static int process_buildid_shim (Dwfl_Module *dwflmod, void **userdata, const char *name,
       Dwarf_Addr base, void *client);
   int process_buildid (Dwfl_Module *dwflmod);
-  std::vector<std::string> script_files;
+  std::vector<std::string> files;
   std::vector<std::string> modules;
   std::vector<std::tuple<std::string, std::string>> buildids;
   systemtap_session &s;
@@ -106,15 +108,18 @@ http_client::get_data (void *ptr, size_t size, size_t nitems)
 {
   string data ((const char *) ptr, (size_t) size * nitems);
 
+  // Process the JSON data.
   if (data.front () == '{')
     {
       enum json_tokener_error json_error;
       root = json_tokener_parse_verbose (data.c_str(), &json_error);
 
-      if (s.verbose >= 3)
-        clog << json_object_to_json_string (root) << endl;
       if (root == NULL)
         throw SEMANTIC_ERROR (json_tokener_error_desc (json_error));
+    }
+  else
+    {
+      clog << "Malformed JSON data: '" << data << "'" << endl;
     }
   return size * nitems;
 }
@@ -160,6 +165,73 @@ http_client::get_file (void *ptr, size_t size, size_t nitems, std::FILE * stream
 }
 
 
+// Trace sent and received packets
+
+int
+http_client::trace(CURL *, curl_infotype type, unsigned char *data, size_t size, void *)
+{
+  string text;
+
+  switch(type)
+  {
+  case CURLINFO_TEXT:
+    clog << "== Info: " << data;
+    return 0;
+
+  case CURLINFO_HEADER_OUT:
+    text = "=> Send header";
+    break;
+  case CURLINFO_DATA_OUT:
+    text = "=> Send data";
+    break;
+  case CURLINFO_HEADER_IN:
+    text = "<= Recv header";
+    break;
+  case CURLINFO_DATA_IN:
+    text = "<= Recv data";
+    break;
+  default:
+    return 0;
+  }
+
+  size_t i;
+  size_t c;
+
+  const unsigned int width = 64;
+  // Packet contents exceeding this size are probably downloaded file components
+  const unsigned int max_size = 0x2000;
+
+  clog << text << " " << size << " bytes (" << showbase << hex << size << ")" << dec << noshowbase << endl;
+
+   if (size > max_size)
+     return 0;
+
+  for (i = 0; i < size; i += width)
+    {
+      clog << setw(4) << setfill('0') << hex << i << dec << setfill(' ') << ": ";
+
+      for (c = 0; (c < width) && (i + c < size); c++)
+        {
+          if ((i + c + 1 < size) && data[i + c] == '\r' && data[i + c + 1] == '\n')
+            {
+              i += (c + 2 - width);
+              break;
+            }
+
+          clog << (char)(isprint (data[i + c]) ? data[i + c] : '.');
+          if ((i + c + 2 < size) && data[i + c + 1] == '\r' && data[i + c + 2] == '\n')
+            {
+              i += (c + 3 - width);
+              break;
+            }
+        }
+      clog << endl;
+    }
+
+  return 0;
+}
+
+
 // Do a download of type TYPE from URL
 
 bool
@@ -171,6 +243,11 @@ http_client::download (const std::string & url, http_client::download_type type)
     curl_easy_reset (curl);
   curl = curl_easy_init ();
   curl_global_init (CURL_GLOBAL_ALL);
+  if (s.verbose > 2)
+    {
+      curl_easy_setopt (curl, CURLOPT_VERBOSE, 1L);
+      curl_easy_setopt (curl, CURLOPT_DEBUGFUNCTION, trace);
+    }
   curl_easy_setopt (curl, CURLOPT_URL, url.c_str ());
   curl_easy_setopt (curl, CURLOPT_NOSIGNAL, 1); //Prevent "longjmp causes uninitialized stack frame" bug
   curl_easy_setopt (curl, CURLOPT_ACCEPT_ENCODING, "deflate");
@@ -182,7 +259,8 @@ http_client::download (const std::string & url, http_client::download_type type)
   if (type == json_type)
     {
       curl_easy_setopt (curl, CURLOPT_WRITEDATA, http);
-      curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION, http_client::get_data_shim);
+      curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
+			http_client::get_data_shim);
     }
   else if (type == file_type)
     {
@@ -230,19 +308,20 @@ http_client::get_rpmname (std::string &search_file)
     rpmReadConfigFiles (NULL, NULL);
 
     int metrics[] =
-      { RPMTAG_ARCH, RPMTAG_EVR, RPMTAG_FILENAMES, RPMTAG_NAME };
+      { RPMTAG_NAME, RPMTAG_EVR, RPMTAG_ARCH, RPMTAG_FILENAMES, };
 
     struct
     {
-      string arch;
-      string evr;
-      string filename;
       string name;
+      string evr;
+      string arch;
     } rpmhdr;
 
+    bool found = false;
     mi = rpmtsInitIterator (ts, RPMDBI_PACKAGES, NULL, 0);
     while (NULL != (hdr = rpmdbNextIterator (mi)))
       {
+	hdr = headerLink(hdr);
         for (unsigned int i = 0; i < (sizeof (metrics) / sizeof (int)); i++)
           {
             headerGet (hdr, metrics[i], td, HEADERGET_EXT);
@@ -253,48 +332,49 @@ http_client::get_rpmname (std::string &search_file)
                   const char *rpmval = rpmtdGetString (td);
                   switch (metrics[i])
                     {
-                    case RPMTAG_ARCH:
-                      rpmhdr.arch = strdup (rpmval);
-                      break;
                     case RPMTAG_NAME:
-                      rpmhdr.name = strdup (rpmval);
+                      rpmhdr.name = rpmval;
                       break;
                     case RPMTAG_EVR:
-                      rpmhdr.evr = strdup (rpmval);
+                      rpmhdr.evr = rpmval;
+		      break;
+                    case RPMTAG_ARCH:
+                      rpmhdr.arch = rpmval;
+                      break;
                     }
                   break;
                 }
               case RPM_STRING_ARRAY_TYPE:
-                {
-                  char **strings;
-                  strings = (char**)td->data;
-                  rpmhdr.filename = "";
-
-                  for (unsigned int idx = 0; idx < td->count; idx++)
-                    {
-                      if (strcmp (strings[idx], search_file.c_str()) == 0)
-                        rpmhdr.filename = strdup (strings[idx]);
-                    }
-                  free (td->data);
-                  break;
-                }
+		while (rpmtdNext(td) >= 0)
+		  {
+		    const char *rpmval = rpmtdGetString (td);
+		    if (strcmp (rpmval, search_file.c_str()) == 0)
+		      {
+			found = true;
+			break;
+		      }
+		  }
+		break;
               }
-
-            if (metrics[i] == RPMTAG_EVR && rpmhdr.filename.length())
-              {
-                rpmdbFreeIterator (mi);
-                rpmtsFree (ts);
-                return rpmhdr.name + "-" + rpmhdr.evr + "." + rpmhdr.arch;
-              }
-
+	    rpmtdFreeData (td);
             rpmtdReset (td);
-          }
+	  }
+	headerFree (hdr);
+	if (found)
+	  break;
       }
-
     rpmdbFreeIterator (mi);
     rpmtsFree (ts);
+    rpmtdFree (td);
 
-    return search_file;
+    if (found)
+      {
+	return rpmhdr.name + "-" + rpmhdr.evr + "." + rpmhdr.arch;
+      }
+
+    // There wasn't an rpm that contains SEARCH_FILE. Return the empty
+    // string.
+    return "";
 }
 
 
@@ -449,117 +529,135 @@ http_client::get_response_code (void)
 }
 
 
-// Post REQUEST_PARAMETERS, script_files, modules, buildids to URL
+// Post REQUEST_PARAMETERS, files, modules, buildids to URL
 
 bool
-http_client::post (const std::string & url,
-                   std::vector<std::tuple<std::string, std::string>> &request_parameters)
+http_client::post (const string & url,
+                   vector<tuple<string, string>> & request_parameters)
 {
-  struct curl_slist *headers=NULL;
+  struct curl_slist *headers = NULL;
   int still_running = false;
-  struct curl_httppost *formpost=NULL;
-  struct curl_httppost *lastptr=NULL;
-  CURLM *multi_handle;
-  static const char buf[] = "Expect:";
-  headers = curl_slist_append (headers, buf);
+  struct curl_httppost *formpost = NULL;
+  struct curl_httppost *lastptr = NULL;
+  struct json_object *jobj = json_object_new_object();
 
-  for (vector<std::tuple<std::string, std::string>>::const_iterator it = request_parameters.begin ();
-      it != request_parameters.end ();
-      ++it)
+  // Add parameter info
+  // "cmd_args": ["script\/\/path\/linetimes.stp","-v","-v",
+  //              "-c\/path\/bench.x","--","process(\"\/path\/bench.x\")","main"]
+
+  string previous_parm_type;
+  string previous_json_data;
+  auto it = request_parameters.begin ();
+  while (it != request_parameters.end ())
     {
       string parm_type = get<0>(*it);
-      char *parm_data = (char*)get<1>(*it).c_str();
-      curl_formadd (&formpost,
-          &lastptr,
-          CURLFORM_COPYNAME, parm_type.c_str(),
-          CURLFORM_COPYCONTENTS, parm_data,
-          CURLFORM_END);
+      string parm_data = get<1>(*it);
+      struct json_object *json_data = json_object_new_string(parm_data.c_str());
+      if (parm_type == previous_parm_type)
+        {
+          // convert original singleton to an array
+          struct json_object *jarr = json_object_new_array();
+          json_data = json_object_new_string(previous_json_data.c_str());
+          json_object_array_add(jarr, json_data);
+          while (parm_type == previous_parm_type)
+            {
+              json_data = json_object_new_string(parm_data.c_str());
+              json_object_array_add(jarr, json_data);
+              previous_parm_type = parm_type;
+              previous_json_data = parm_data;
+              it++;
+              parm_type = get<0>(*it);
+              parm_data = get<1>(*it);
+            }
+          json_object_object_add(jobj, previous_parm_type.c_str(), jarr);
+          continue;
+        }
+      else
+        json_object_object_add(jobj, parm_type.c_str(), json_data);
+      previous_parm_type = parm_type;
+      previous_json_data = parm_data;
+      it++;
     }
 
-  // Fill in the file upload field; libcurl will load data from the given file name
-  for (vector<std::string>::const_iterator it = script_files.begin ();
-      it != script_files.end ();
-      ++it)
+  // Fill in the file upload field; libcurl will load data from the
+  // given file name.
+  for (auto it = files.begin (); it != files.end (); ++it)
     {
-      string script_file = (*it);
-      string script_base = basename (script_file.c_str());
+      string filename = (*it);
+      string filebase = basename (filename.c_str());
 
-      curl_formadd (&formpost,
-		    &lastptr,
-		    CURLFORM_COPYNAME, script_base.c_str(),
-		    CURLFORM_FILE, script_file.c_str(),
+      curl_formadd (&formpost, &lastptr,
+		    CURLFORM_COPYNAME, filebase.c_str(),
+		    CURLFORM_FILE, filename.c_str(),
 		    CURLFORM_END);
-
-      curl_formadd (&formpost,
-                    &lastptr,
+      curl_formadd (&formpost, &lastptr,
                     CURLFORM_COPYNAME, "files",
-                    CURLFORM_COPYCONTENTS, script_file.c_str(),
+                    CURLFORM_COPYCONTENTS, filename.c_str(),
                     CURLFORM_END);
-
-      // FIXME: There is no guarantee that the first file in
-      // script_files is a script - "stap -I foo/ -e '...script...'".
-      // 
-      // script name is not in cmd_args so add it manually
-      if (it == script_files.begin())
-        curl_formadd (&formpost,
-                      &lastptr,
-                      CURLFORM_COPYNAME, "cmd_args",
-                      CURLFORM_COPYCONTENTS, script_base.c_str(),
-                      CURLFORM_END);
     }
+
+  // Add package info
+  //   "file_info": [ { "file_pkg": "kernel-4.14.0-0.rc4.git4.1.fc28.x86_64",
+  //                       "file_name": "kernel",
+  //                       "build_id": "ef7210ee3a447c798c3548102b82665f03ef241f" },
+  //                  { "file_pkg": "foo-1.1.x86_64",
+  //                       "file_name": "/usr/bin/foo",
+  //                       "build_id": "deadbeef" }
+  //                ]
 
   int bid_idx = 0;
 
-  for (vector<std::string>::const_iterator it = modules.begin ();
-      it != modules.end ();
-      ++it)
+  struct json_object *jarr = json_object_new_array();
+  for (auto it = modules.begin (); it != modules.end (); ++it, ++bid_idx)
     {
-      string module = (*it);
-      std::stringstream ss;
+      struct json_object *jfobj = json_object_new_object();
+      string pkg = (*it);
+      string name = std::get<0>(buildids[bid_idx]);
+      string build_id = std::get<1>(buildids[bid_idx]);
 
-      string bid_module = std::get<0>(buildids[bid_idx]);
-      string buildid = std::get<1>(buildids[bid_idx]);
+      json_object_object_add (jfobj, "file_name", json_object_new_string (name.c_str()));
+      json_object_object_add (jfobj, "file_pkg", json_object_new_string (pkg.c_str()));
+      json_object_object_add (jfobj, "build_id", json_object_new_string (build_id.c_str()));
+      json_object_array_add (jarr, jfobj);
+    }
+  json_object_object_add(jobj, "file_info", jarr);
 
-      ss  << "{"
-          << "\"package\" : \"" << module
-          << "\", \"filename\" : \"" << bid_module
-          << "\", \"id\" : \"" << buildid
-          << "\"}";
-      curl_formadd (&formpost,
-          &lastptr,
-          CURLFORM_COPYNAME, "package info",
-          CURLFORM_CONTENTTYPE, "application/json",
-          CURLFORM_COPYCONTENTS, ss.str().c_str(),
-          CURLFORM_END);
-      bid_idx += 1;
+
+  // Add environment variables info
+  // "env_vars": {"LANG":"en_US.UTF-8","LC_MESSAGES":"en_US.UTF-8"}
+
+  if (! http->env_vars.empty())
+    {
+      struct json_object *jlvobj = json_object_new_object();
+      for (auto i = http->env_vars.begin();
+          i != http->env_vars.end();
+          ++i)
+        {
+          string name = get<0>(*i);
+          string value = get<1>(*i);
+          json_object_object_add (jlvobj, name.c_str(), json_object_new_string(value.c_str()));
+        }
+      if (http->env_vars.size())
+        json_object_object_add (jobj, "env_vars", jlvobj);
     }
 
-  multi_handle = curl_multi_init();
+  curl_formadd (&formpost, &lastptr,
+      CURLFORM_COPYNAME, "command_environment",
+      CURLFORM_CONTENTTYPE, "application/json",
+      CURLFORM_COPYCONTENTS,
+      json_object_to_json_string_ext (jobj, JSON_C_TO_STRING_PLAIN),
+      CURLFORM_END);
+  json_object_put(jobj);
+
+  headers = curl_slist_append (headers, "Expect:");
 
   curl_easy_setopt (curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt (curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt (curl, CURLOPT_HTTPPOST, formpost);
 
-  // Mostly for debugging
-  if (s.verbose >= 4)
-    {
-      curl_easy_setopt (curl, CURLOPT_VERBOSE, 1L);
-      CURL *db_curl = curl_easy_init();
-      clog << "BEGIN dump post data" << endl;
-      curl_easy_setopt(db_curl, CURLOPT_URL, "http://httpbin.org/post");
-      curl_easy_setopt (db_curl, CURLOPT_HTTPHEADER, headers);
-      curl_easy_setopt (db_curl, CURLOPT_HTTPPOST, formpost);
-      CURLcode res = curl_easy_perform (db_curl);
-      if (res != CURLE_OK)
-        clog << "curl_easy_perform() failed: " << curl_easy_strerror (res) << endl;
-      clog << "END dump post data" << endl;
-      curl_easy_cleanup (db_curl);
-    }
-
+  CURLM *multi_handle = curl_multi_init();
   curl_multi_add_handle (multi_handle, curl);
-
   curl_multi_perform (multi_handle, &still_running);
-
   do {
       struct timeval timeout;
       int rc; // select() return code
@@ -625,24 +723,18 @@ http_client::post (const std::string & url,
   } while (still_running);
 
   curl_multi_cleanup (multi_handle);
-
   curl_formfree (formpost);
-
   curl_slist_free_all (headers);
 
   return true;
 }
 
 
-//  Add SCRIPT_FILE having SCRIPT_TYPE to script_files
-
+//  Add FILE to files
 void
-http_client::add_script_file (std::string script_type, std::string script_file)
+http_client::add_file (std::string filename)
 {
-  if (script_type == "tapset")
-    script_files.push_back (script_file);
-  else
-    script_files.insert(script_files.begin(), script_file);
+  files.push_back (filename);
 }
 
 
@@ -655,8 +747,37 @@ http_client::add_module (std::string module)
 }
 
 
+// Ask the server to delete a URL.
+
+bool
+http_client::delete_op (const std::string & url)
+{
+  if (curl)
+    curl_easy_reset (curl);
+  curl = curl_easy_init ();
+  curl_global_init (CURL_GLOBAL_ALL);
+  if (s.verbose > 2)
+    {
+      curl_easy_setopt (curl, CURLOPT_VERBOSE, 1L);
+      curl_easy_setopt (curl, CURLOPT_DEBUGFUNCTION, trace);
+    }
+  curl_easy_setopt (curl, CURLOPT_URL, url.c_str ());
+  curl_easy_setopt (curl, CURLOPT_NOSIGNAL, 1); //Prevent "longjmp causes uninitialized stack frame" bug
+  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+
+  CURLcode res = curl_easy_perform (curl);
+  if (res != CURLE_OK)
+    {
+      clog << "curl_easy_perform() failed: " << curl_easy_strerror (res)
+	   << endl;
+      return false;
+    }
+  return true;
+}
+
+
 http_client_backend::http_client_backend (systemtap_session &s)
-  : client_backend(s)
+  : client_backend(s), files_seen(false)
 {
   server_tmpdir = s.tmpdir;
 }
@@ -666,19 +787,124 @@ http_client_backend::initialize ()
 {
   http = new http_client (s);
   request_parameters.clear();
-  request_files.clear();
   return 0;
+}
+
+// Symbolically link the given file or directory into the client's temp
+// directory under the given subdirectory.
+//
+// We need to do this even for the http client/server so that we can
+// fully handle systemtap's complexity. A tricky example of this
+// complexity would be something like "stap -I tapset_dir script.stp",
+// where "tapset_dir" is empty. You can transfer files with a POST,
+// but you can't really indicate an empty directory.
+//
+// So, we'll handle this like the NSS client does - build up a
+// directory of all the files we need to transfer over to the server
+// and zip it up and send the one zip file.
+int
+http_client_backend::include_file_or_directory (const string &subdir,
+						const string &path,
+						const bool add_arg)
+{
+  // Must predeclare these because we do use 'goto done' to
+  // exit from error situations.
+  vector<string> components;
+  string name;
+  int rc = 0;
+
+  // Canonicalize the given path and remove the leading /.
+  string rpath;
+  char *cpath = canonicalize_file_name (path.c_str ());
+  if (! cpath)
+    {
+      // It can not be canonicalized. Use the name relative to
+      // the current working directory and let the server deal with it.
+      char cwd[PATH_MAX];
+      if (getcwd (cwd, sizeof (cwd)) == NULL)
+	{
+	  rpath = path;
+	  rc = 1;
+	  goto done;
+	}
+	rpath = string (cwd) + "/" + path;
+    }
+  else
+    {
+      // It can be canonicalized. Use the canonicalized name and add this
+      // file or directory to the request package.
+      rpath = cpath;
+      free (cpath);
+
+      // Including / would require special handling in the code below and
+      // is a bad idea anyway. Let's not allow it.
+      if (rpath == "/")
+	{
+	  if (rpath != path)
+	    clog << _F("%s resolves to %s\n", path.c_str (), rpath.c_str ());
+	  clog << _F("Unable to send %s to the server\n", path.c_str ());
+	  return 1;
+	}
+
+      // First create the requested subdirectory (if there is one).
+      if (! subdir.empty())
+        {
+	  name = client_tmpdir + "/" + subdir;
+	  rc = create_dir (name.c_str ());
+	  if (rc) goto done;
+	}
+      else
+        {
+	  name = client_tmpdir;
+	}
+
+      // Now create each component of the path within the sub directory.
+      assert (rpath[0] == '/');
+      tokenize (rpath.substr (1), components, "/");
+      assert (components.size () >= 1);
+      unsigned i;
+      for (i = 0; i < components.size() - 1; ++i)
+	{
+	  if (components[i].empty ())
+	    continue; // embedded '//'
+	  name += "/" + components[i];
+	  rc = create_dir (name.c_str ());
+	  if (rc) goto done;
+	}
+
+      // Now make a symbolic link to the actual file or directory.
+      assert (i == components.size () - 1);
+      name += "/" + components[i];
+      rc = symlink (rpath.c_str (), name.c_str ());
+      if (rc) goto done;
+    }
+
+  // If the caller asks us, add this file or directory to the arguments.
+  if (add_arg)
+    rc = add_cmd_arg (subdir + "/" + rpath.substr (1));
+
+ done:
+  if (rc != 0)
+    {
+      const char* e = strerror (errno);
+      clog << "ERROR: unable to add "
+	   << rpath
+	   << " to temp directory as "
+	   << name << ": " << e
+	   << endl;
+    }
+  else
+    {
+      files_seen = true;
+    }
+  return rc;
 }
 
 int
 http_client_backend::package_request ()
 {
-  return 0;
-}
+  int rc = 0;
 
-int
-http_client_backend::find_and_connect_to_server ()
-{
   http->add_module ("kernel-" + s.kernel_release);
   http->get_kernel_buildid ();
 
@@ -690,18 +916,52 @@ http_client_backend::find_and_connect_to_server ()
       if (module != "kernel")
         {
 	  string rpmname = http->get_rpmname (module);
-	  http->get_buildid (module);
-	  http->add_module (rpmname);
+	  if (! rpmname.empty())
+	    {
+	      http->get_buildid (module);
+	      http->add_module (rpmname);
+	    }
+	  else if (module[0] == '/')
+	    {
+		include_file_or_directory ("files", module, false);
+	    }
 	}
     }
 
+  // Package up the temporary directory into a zip file, if needed.
+  if (files_seen)
+    {
+      string client_zipfile = client_tmpdir + ".zip";
+      string cmd = "cd " + cmdstr_quoted(client_tmpdir) + " && zip -qr "
+	  + cmdstr_quoted(client_zipfile) + " *";
+      vector<string> sh_cmd { "sh", "-c", cmd };
+      rc = stap_system (s.verbose, sh_cmd);
+
+      if (rc == 0)
+	http->add_file(client_zipfile);
+    }
+  return rc;
+}
+
+int
+http_client_backend::find_and_connect_to_server ()
+{
   for (vector<std::string>::const_iterator i = s.http_servers.begin ();
       i != s.http_servers.end ();
       ++i)
     {
-      // Try to connect to the server.
-      if (http->download (*i + "/builds", http->json_type))
+      // Try to connect to the server. We'll try to grab the base
+      // directory of the server just to see if we can make a
+      // connection.
+      if (http->download (*i + "/", http->json_type))
         {
+	  // FIXME: The server returns its version number. We might
+	  // need to check it for compatibility.
+	  //
+	  // FIXME 2: When the server starts signing modules, we'll
+	  // need to check and see if it is trusted.
+
+	  // Send our build request.
 	  if (http->post (*i + "/builds", request_parameters))
 	    {
 	      s.winning_server = *i;
@@ -717,16 +977,15 @@ http_client_backend::find_and_connect_to_server ()
 int
 http_client_backend::unpack_response ()
 {
-  std::string::size_type found = http->host.find ("/builds");
-  std::string uri;
+  std::string build_uri;
   std::map<std::string, std::string>::iterator it_loc;
   it_loc = http->header_values.find("Location");
   if (it_loc == http->header_values.end())
-    clog << "Cannot get location from server" << endl;
-  if (found != std::string::npos)
-    uri = http->host.substr (0, found) + http->header_values["Location"];
-  else
-    uri = http->host + http->header_values["Location"];
+    {
+      clog << "Cannot get location from server" << endl;
+      return 1;
+    }
+  build_uri = http->host + http->header_values["Location"];
 
   if (s.verbose >= 2)
     clog << "Initial response code: " << http->get_response_code() << endl;
@@ -806,7 +1065,7 @@ http_client_backend::unpack_response ()
   json_object_object_get_ex (http->root, "files", &files);
   if (files)
     {
-      for (int k = 0; k < json_object_array_length (files); k++)
+      for (size_t k = 0; k < (size_t)json_object_array_length (files); k++)
         {
 	  json_object *files_element = json_object_array_get_idx (files, k);
 	  json_object *loc;
@@ -841,6 +1100,9 @@ http_client_backend::unpack_response ()
       clog << "Couldn't find 'stdout' in JSON results data" << endl;
       return 1;
     }
+
+  // Tell the server to delete this build (and any associated result).
+  http->delete_op (build_uri);
   return 0;
 }
 
@@ -874,35 +1136,10 @@ http_client_backend::add_sysinfo ()
   return 0;
 }
 
-
 int
-add_tapsets (const char *name, const struct stat *status __attribute__ ((unused)), int type)
+http_client_backend::add_tmpdir_file (const std::string &)
 {
-  if (type == FTW_F)
-    http->add_script_file ("tapset", name);
-
-  return 0;
-}
-
-
-int
-http_client_backend::include_file_or_directory (const std::string &script_type,
-						const std::string &script_file)
-{
-  // FIXME: this is going to be interesting. We can't add a whole
-  // directory at one shot, we'll have to traverse the directory and
-  // add each file, preserving the directory structure somehow.
-  if (script_type == "tapset")
-    ftw (script_file.c_str(), add_tapsets, 1);
-  else
-    http->add_script_file (script_type, script_file);
-  return 0;
-}
-
-int
-http_client_backend::add_tmpdir_file (const std::string &file)
-{
-  request_files.push_back(make_tuple("files", file));
+  files_seen = true;
   return 0;
 }
 
@@ -914,10 +1151,10 @@ http_client_backend::add_cmd_arg (const std::string &arg)
 }
 
 void
-http_client_backend::add_localization_variable (const std::string &,
-					        const std::string &)
+http_client_backend::add_localization_variable (const std::string &name,
+					        const std::string &value)
 {
-  // FIXME: We'll probably just add to the request_parameters here.
+  http->env_vars.push_back(make_tuple(name, value));
   return;
 }
 
@@ -926,6 +1163,50 @@ http_client_backend::add_mok_fingerprint (const std::string &)
 {
   // FIXME: We'll probably just add to the request_parameters here.
   return;
+}
+
+void
+http_client_backend::fill_in_server_info (compile_server_info &info)
+{
+  // Try to connect to the server. We'll try to grab the base
+  // directory of the server just to see if we can make a
+  // connection.
+  string host_spec = info.host_specification ();
+  if (host_spec.empty())
+    return;
+
+  string url = host_spec + "/";
+  if (http->download (url, http->json_type))
+    {
+      json_object *ver_obj;
+      json_bool jfound;
+
+      // Get the server version number.
+      jfound = json_object_object_get_ex (http->root, "version", &ver_obj);
+      if (jfound)
+	info.version = json_object_get_string(ver_obj);
+
+      // Get the server arch.
+      jfound = json_object_object_get_ex (http->root, "arch", &ver_obj);
+      if (jfound)
+	info.sysinfo = json_object_get_string(ver_obj);
+
+      // Get the server certificate info.
+      jfound = json_object_object_get_ex (http->root, "cert_info", &ver_obj);
+      if (jfound)
+	info.certinfo = json_object_get_string(ver_obj);
+
+      // If the download worked, this server is obviously online.
+      nss_add_online_server_info (s, info);
+  }
+}
+
+int
+http_client_backend::trust_server_info (const compile_server_info &)
+{
+    // FIXME: need to implement!
+    clog << "Unimplemented HTTP client trust support" << endl;
+    return NSS_GENERAL_ERROR;
 }
 
 #endif /* HAVE_HTTP_SUPPORT */
