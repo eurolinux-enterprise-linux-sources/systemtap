@@ -88,7 +88,7 @@
 
 Name: systemtap
 Version: 4.0
-Release: 10%{?release_override}%{?dist}
+Release: 9%{?release_override}%{?dist}
 # for version, see also configure.ac
 
 
@@ -164,7 +164,6 @@ Patch36: rhbz1657857.patch
 Patch37: rhbz1657909.patch
 Patch50: bpf-unwarn.patch
 Patch51: stapbpf-kmsg.patch
-Patch52: rhbz1731333.patch
 
 # Build*
 BuildRequires: gcc-c++
@@ -617,7 +616,6 @@ cd ..
 %patch37 -p1
 %patch50 -p1
 %patch51 -p1
-%patch52 -p1
 
 %build
 
@@ -1361,9 +1359,6 @@ done
 
 # PRERELEASE
 %changelog
-* Tue Sep 03 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-10
-- rhbz1731333: nfsd.proc.write loss of vlen
-
 * Wed Apr 03 2019 Frank Ch. Eigler <fche@elastic.org> - 4.0-9
 - Backport stapbpf /dev/ksmg-related patches.
 
